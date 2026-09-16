@@ -1,0 +1,215 @@
+// Modelo de datos del backend de SCILD Emergencia.
+// Users/Groups/Devices/Alerts/Messages/Notifications/DeviceEvents/
+// DeviceConfigurations/AuditLogs, tal como se definió en la propuesta técnica.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  MEMBER
+}
+
+enum DeviceStatus {
+  ONLINE
+  IRREGULAR
+  OFFLINE
+  EMERGENCY
+  MAINTENANCE
+}
+
+enum AlertSource {
+  DEVICE
+  APP
+}
+
+enum AlertStatus {
+  ACTIVE
+  ACKNOWLEDGED
+  RESOLVED
+}
+
+enum DeviceEventType {
+  HEARTBEAT
+  PANIC
+  STATUS_CHANGE
+  CONFIG_UPDATE
+  CONNECTED
+  DISCONNECTED
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+  READ
+}
+
+// La identidad y la contraseña viven en Firebase Auth. Este modelo solo
+// guarda el perfil y enlaza con Firebase mediante firebaseUid.
+model User {
+  id          String   @id @default(uuid())
+  firebaseUid String   @unique
+  email       String   @unique
+  displayName String?
+  phone       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  memberships       GroupMember[]
+  messages          Message[]
+  alertsCreated     Alert[]        @relation("AlertCreatedBy")
+  notifications     Notification[]
+  auditLogs         AuditLog[]
+
+  @@index([email])
+}
+
+model Group {
+  id         String   @id @default(uuid())
+  name       String
+  address    String?
+  latitude   Float?
+  longitude  Float?
+  inviteCode String   @unique
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  members  GroupMember[]
+  devices  Device[]
+  alerts   Alert[]
+  messages Message[]
+}
+
+model GroupMember {
+  id       String   @id @default(uuid())
+  userId   String
+  groupId  String
+  role     Role     @default(MEMBER)
+  joinedAt DateTime @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, groupId])
+  @@index([groupId])
+}
+
+// El Device Secret nunca se guarda en texto plano: solo su hash.
+// El ESP32 se autentica firmando/enviando el secreto y el backend
+// lo compara contra secretHash (bcrypt/argon2), nunca al revés.
+model Device {
+  id                String       @id @default(uuid())
+  deviceCode        String       @unique
+  name              String?
+  groupId           String
+  secretHash        String
+  status            DeviceStatus @default(OFFLINE)
+  firmwareVersion   String?
+  batteryLevel      Int?
+  lastSeenAt        DateTime?
+  heartbeatInterval Int          @default(60)
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  group          Group                 @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  alerts         Alert[]
+  events         DeviceEvent[]
+  configurations DeviceConfiguration[]
+
+  @@index([groupId])
+}
+
+// Bitácora cruda de todo lo que manda el dispositivo (heartbeat, panic,
+// cambios de estado). Sirve para diagnóstico e historial sin inflar Device.
+model DeviceEvent {
+  id        String          @id @default(uuid())
+  deviceId  String
+  type      DeviceEventType
+  payload   Json?
+  createdAt DateTime        @default(now())
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@index([deviceId, createdAt])
+}
+
+model DeviceConfiguration {
+  id        String   @id @default(uuid())
+  deviceId  String
+  key       String
+  value     String
+  updatedBy String?
+  updatedAt DateTime @updatedAt
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@unique([deviceId, key])
+}
+
+model Alert {
+  id             String      @id @default(uuid())
+  groupId        String
+  deviceId       String?
+  source         AlertSource
+  status         AlertStatus @default(ACTIVE)
+  createdById    String?
+  createdAt      DateTime    @default(now())
+  acknowledgedAt DateTime?
+  resolvedAt     DateTime?
+
+  group         Group          @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  device        Device?        @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+  createdBy     User?          @relation("AlertCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  notifications Notification[]
+
+  @@index([groupId, createdAt])
+}
+
+model Notification {
+  id        String             @id @default(uuid())
+  alertId   String
+  userId    String
+  status    NotificationStatus @default(PENDING)
+  sentAt    DateTime?
+  readAt    DateTime?
+  createdAt DateTime           @default(now())
+
+  alert Alert @relation(fields: [alertId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+}
+
+model Message {
+  id        String   @id @default(uuid())
+  groupId   String
+  userId    String
+  content   String
+  createdAt DateTime @default(now())
+
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([groupId, createdAt])
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  userId    String?
+  action    String
+  entity    String
+  entityId  String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([entity, entityId])
+}
