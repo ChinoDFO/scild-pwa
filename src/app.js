@@ -1,5 +1,6 @@
 import express from "express";
 import helmet from "helmet";
+import cors from "cors";
 import rateLimit from "express-rate-limit";
 import devicesRouter from "./routes/devices.js";
 import authRouter from "./routes/auth.js";
@@ -7,7 +8,11 @@ import groupsRouter from "./routes/groups.js";
 
 const app = express();
 
+// El ESP32 no manda Origin, así que esto solo afecta a la PWA en el navegador.
+const origenesPermitidos = (process.env.FRONTEND_ORIGIN || "http://localhost:5173").split(",");
+
 app.use(helmet());
+app.use(cors({ origin: origenesPermitidos }));
 app.use(express.json({ limit: "10kb" }));
 
 // Límite generoso frente al heartbeat esperado (cada 60s por defecto);
