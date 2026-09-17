@@ -5,6 +5,7 @@ import rateLimit from "express-rate-limit";
 import devicesRouter from "./routes/devices.js";
 import authRouter from "./routes/auth.js";
 import groupsRouter from "./routes/groups.js";
+import notificationsRouter from "./routes/notifications.js";
 
 const app = express();
 
@@ -35,6 +36,7 @@ const userLimiter = rateLimit({
 app.use("/api/devices", deviceLimiter, devicesRouter);
 app.use("/api/auth", userLimiter, authRouter);
 app.use("/api/groups", userLimiter, groupsRouter);
+app.use("/api/notifications", userLimiter, notificationsRouter);
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 

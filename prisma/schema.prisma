@@ -66,6 +66,7 @@ model User {
   messages          Message[]
   alertsCreated     Alert[]        @relation("AlertCreatedBy")
   notifications     Notification[]
+  pushTokens        PushToken[]
   auditLogs         AuditLog[]
 
   @@index([email])
@@ -185,6 +186,24 @@ model Notification {
   user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, status])
+}
+
+// Token de FCM de un navegador/instalación concreta de la PWA. Una persona
+// puede traer la app en el celular y en la compu, y cada una tiene su propio
+// token, así que esto es una tabla aparte y no una columna de User. El token
+// es único: si reaparece bajo otra cuenta (celular compartido) se reasigna al
+// nuevo dueño en vez de duplicarse.
+model PushToken {
+  id         String   @id @default(uuid())
+  userId     String
+  token      String   @unique
+  userAgent  String?
+  createdAt  DateTime @default(now())
+  lastUsedAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 model Message {

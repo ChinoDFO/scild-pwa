@@ -2,6 +2,7 @@ import "dotenv/config";
 import { readFileSync } from "node:fs";
 import { initializeApp, cert } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
+import { getMessaging } from "firebase-admin/messaging";
 
 const serviceAccountPath =
   process.env.FIREBASE_SERVICE_ACCOUNT_PATH || "./firebase-service-account.json";
@@ -13,3 +14,4 @@ const firebaseApp = initializeApp({
 });
 
 export const firebaseAuth = getAuth(firebaseApp);
+export const firebaseMessaging = getMessaging(firebaseApp);

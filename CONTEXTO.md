@@ -54,9 +54,10 @@ directo con los usuarios; todo pasa por el backend.
 
 ### Backend (`scild-backend`)
 
-- **Base de datos** migrada en Neon con 10 tablas: `User`, `Group`,
+- **Base de datos** migrada en Neon con 11 tablas: `User`, `Group`,
   `GroupMember`, `Device`, `DeviceEvent`, `DeviceConfiguration`, `Alert`,
-  `Notification`, `Message`, `AuditLog`. Ver `prisma/schema.prisma`.
+  `Notification`, `PushToken`, `Message`, `AuditLog`. Ver
+  `prisma/schema.prisma`.
 - **Endpoints del ESP32** (autenticados con headers `x-device-code` /
   `x-device-secret`, comparados contra el hash guardado):
   - `POST /api/devices/heartbeat` — reporta que sigue vivo, actualiza
@@ -74,6 +75,23 @@ directo con los usuarios; todo pasa por el backend.
     como `ADMIN`.
   - `POST /api/groups/join` — se une a un grupo con `inviteCode` (404 si
     no existe, 409 si ya es miembro).
+  - `POST /api/notifications/token` — registra el token de FCM del
+    navegador actual (se reasigna si ya existía bajo otra cuenta).
+  - `DELETE /api/notifications/token` — lo borra al cerrar sesión.
+- **Notificaciones push (FCM)**, en `src/push.js`:
+  - `/panic` crea la `Alert` y, en la **misma transacción**, una
+    `Notification` PENDING por cada miembro del grupo. Así queda registro
+    de a quién había que avisar aunque FCM falle.
+  - El envío ocurre **después** de responderle al ESP32 (corre con batería
+    y timeout corto, no puede esperar a FCM). Cada `Notification` pasa a
+    `SENT` o `FAILED`; basta que uno de los navegadores del usuario reciba
+    el aviso para contarla como enviada.
+  - Los tokens que FCM reporta como muertos (app desinstalada, permiso
+    revocado, token rotado) se borran solos, para no reintentar contra
+    ellos en cada alerta.
+  - Miembros sin ningún token registrado se quedan en `PENDING` a
+    propósito: no es un fallo de envío, la alerta les debe aparecer dentro
+    de la app cuando entren.
 - Seguridad: Helmet, rate limiting (30 req/min dispositivos, 120 req/min
   usuarios), CORS restringido al origen del frontend.
 - `scripts/createDevice.js` — da de alta un dispositivo de prueba (crea su
@@ -91,6 +109,16 @@ Proyecto nuevo: React + TypeScript + Vite + Tailwind v4 + React Router.
   mostrar el perfil ya sincronizado con el backend.
 - `services/api.ts` — cliente que adjunta el ID token de Firebase en cada
   llamada al backend.
+- `services/notificaciones.ts` + `components/Notificaciones.tsx` — pide el
+  permiso, saca el token de FCM y lo registra en el backend. Distingue los
+  cuatro estados posibles (no soportado / desactivadas / bloqueadas /
+  activadas) y muestra la alerta en pantalla cuando llega con la app
+  abierta, porque en primer plano el navegador no dibuja el aviso del
+  sistema.
+- `public/firebase-messaging-sw.js` — service worker que recibe las alertas
+  con la app cerrada. No pasa por Vite, así que recibe la config de
+  Firebase en la query string con la que se registra, en vez de llevarla
+  hardcodeada.
 
 Todo esto se probó de punta a punta en navegador: registro real, logout,
 login con contraseña incorrecta (rechaza bien) y correcta (entra bien).
@@ -121,15 +149,28 @@ por un canal privado, nunca por chat público ni commiteados):
   (Configuración del proyecto → Cuentas de servicio → Generar nueva clave
   privada) en vez de que te pasen la misma que usa otro.
 - `scild-emergencia/.env` — la config web de Firebase (`VITE_FIREBASE_*`,
-  esta sí es pública/no secreta) y `VITE_API_URL=http://localhost:3000`.
+  esta sí es pública/no secreta), la `VITE_FIREBASE_VAPID_KEY` para el push
+  web (Firebase Console → Cloud Messaging → Certificados push web) y
+  `VITE_API_URL=http://localhost:3000`.
+
+Nota para Windows: si el proyecto vive dentro de OneDrive, `npm run dev` del
+backend se reinicia solo cada rato, porque `node --watch` ve los archivos que
+OneDrive sincroniza en `node_modules`. Se acota con
+`node --watch-path=./src src/server.js`, o moviendo el proyecto fuera de
+OneDrive.
+
+Las notificaciones push **solo funcionan sobre HTTPS o en `localhost`**. En
+iPhone, además, Safari solo las permite si la PWA está instalada en la
+pantalla de inicio (de ahí que el punto de `vite-plugin-pwa` importe para
+iOS, no solo por comodidad).
 
 ## 6. Qué falta (roadmap inmediato)
 
 En orden sugerido, retomando el plan por etapas de la propuesta original:
 
-1. **FCM (notificaciones push)** — cuando `/panic` crea una `Alert`, avisar
-   de verdad a los miembros del grupo (ahora mismo la alerta se guarda
-   pero nadie recibe notificación).
+1. **Endpoint de alerta manual** — el `AlertSource.APP` ya existe en el
+   schema y `push.js` ya sabe redactar el aviso para ese caso, pero falta
+   el `POST /api/alerts` que lo dispare desde la PWA.
 2. **Pantallas de grupos en el frontend** — crear grupo / unirse con
    código de invitación (el backend ya lo soporta, falta la UI).
 3. **Pantallas de dispositivos** — ver estado, última conexión, historial,

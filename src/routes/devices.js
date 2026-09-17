@@ -1,6 +1,7 @@
 import { Router } from "express";
 import prisma from "../prisma.js";
 import { deviceAuth } from "../middleware/deviceAuth.js";
+import { crearNotificacionesPendientes, enviarPushDeAlerta } from "../push.js";
 
 const router = Router();
 
@@ -57,12 +58,31 @@ router.post("/panic", deviceAuth, async (req, res) => {
       data: { status: "EMERGENCY", lastSeenAt: new Date() },
     });
 
+    await crearNotificacionesPendientes(tx, {
+      alertId: createdAlert.id,
+      groupId: device.groupId,
+    });
+
     return createdAlert;
   });
 
   // El backend confirma la recepción y devuelve el id único de la alerta,
   // tal como pide la propuesta (sección 17).
   res.status(201).json({ alertId: alert.id, createdAt: alert.createdAt });
+
+  // El push se manda DESPUÉS de responder: el ESP32 corre con batería y un
+  // timeout corto, no puede quedarse esperando a que FCM conteste. Si esto
+  // falla, las Notification quedan en PENDING y se pueden reintentar.
+  enviarPushDeAlerta(alert.id)
+    .then((resumen) => {
+      console.log(
+        `Alerta ${alert.id}: push a ${resumen.tokens} tokens, ` +
+          `${resumen.enviadas} entregadas, ${resumen.fallidas} fallidas`
+      );
+    })
+    .catch((e) => {
+      console.error(`No se pudo enviar el push de la alerta ${alert.id}:`, e);
+    });
 });
 
 router.post("/status", deviceAuth, async (req, res) => {
