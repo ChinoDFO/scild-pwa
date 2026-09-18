@@ -2,6 +2,7 @@ import { Router } from "express";
 import prisma from "../prisma.js";
 import { deviceAuth } from "../middleware/deviceAuth.js";
 import { crearNotificacionesPendientes, enviarPushDeAlerta } from "../push.js";
+import { emitirAGrupo } from "../realtime.js";
 
 const router = Router();
 
@@ -69,6 +70,7 @@ router.post("/panic", deviceAuth, async (req, res) => {
   // El backend confirma la recepción y devuelve el id único de la alerta,
   // tal como pide la propuesta (sección 17).
   res.status(201).json({ alertId: alert.id, createdAt: alert.createdAt });
+  emitirAGrupo(device.groupId, "alertas:cambio", { groupId: device.groupId, alertId: alert.id });
 
   // El push se manda DESPUÉS de responder: el ESP32 corre con batería y un
   // timeout corto, no puede quedarse esperando a que FCM conteste. Si esto

@@ -159,6 +159,10 @@ model Alert {
   groupId        String
   deviceId       String?
   source         AlertSource
+  // Qué está pasando (CARRO_SOSPECHOSO, INCENDIO, ...). Es String y no enum
+  // a propósito: el catálogo vive en src/tiposAlerta.js y cambiarlo no debe
+  // requerir una migración. El botón físico siempre manda GENERAL.
+  type           String      @default("GENERAL")
   status         AlertStatus @default(ACTIVE)
   createdById    String?
   createdAt      DateTime    @default(now())

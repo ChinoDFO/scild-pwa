@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE "Alert" ADD COLUMN     "type" TEXT NOT NULL DEFAULT 'GENERAL';

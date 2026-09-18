@@ -1,5 +1,6 @@
 import { firebaseMessaging } from "./firebaseAdmin.js";
 import prisma from "./prisma.js";
+import { tipoDeAlerta } from "./tiposAlerta.js";
 
 // Códigos con los que FCM avisa que un token ya no sirve: la PWA se
 // desinstaló, el usuario revocó el permiso, o el token rotó. Esos se borran
@@ -10,21 +11,23 @@ const CODIGOS_TOKEN_MUERTO = new Set([
   "messaging/invalid-argument",
 ]);
 
-// Al enviar, una alerta se ve así en la pantalla del celular.
+// Al enviar, una alerta se ve así en la pantalla del celular. El título dice
+// QUÉ pasa (tipo) y el cuerpo quién/dónde, para entenderla sin abrir la app.
 function armarAviso(alerta) {
+  const tipo = tipoDeAlerta(alerta.type);
   const nombreGrupo = alerta.group.name;
+  const title = `${tipo.emoji} ${tipo.etiqueta}`;
 
   if (alerta.source === "DEVICE") {
     const boton = alerta.device?.name || alerta.device?.deviceCode || "el botón";
-    return {
-      title: "🚨 Emergencia",
-      body: `Se presionó ${boton} en ${nombreGrupo}`,
-    };
+    return { title, body: `Se presionó ${boton} en ${nombreGrupo}` };
   }
 
+  const quien = alerta.createdBy?.displayName || alerta.createdBy?.email;
+  const que = tipo.id === "GENERAL" ? "una emergencia" : tipo.etiqueta.toLowerCase();
   return {
-    title: "🚨 Emergencia",
-    body: `Alerta manual en ${nombreGrupo}`,
+    title,
+    body: quien ? `${quien} reportó ${que} en ${nombreGrupo}` : `Alerta en ${nombreGrupo}: ${que}`,
   };
 }
 
@@ -32,9 +35,10 @@ function armarAviso(alerta) {
 // de la misma transacción que crea la Alert, a propósito: así queda registro
 // durable de a quién había que avisar incluso si FCM falla después, y el
 // envío puede reintentarse leyendo las que quedaron en PENDING.
-export async function crearNotificacionesPendientes(tx, { alertId, groupId }) {
+// excluirUserId: en una alerta manual, quien la generó no necesita aviso.
+export async function crearNotificacionesPendientes(tx, { alertId, groupId, excluirUserId }) {
   const miembros = await tx.groupMember.findMany({
-    where: { groupId },
+    where: { groupId, ...(excluirUserId ? { userId: { not: excluirUserId } } : {}) },
     select: { userId: true },
   });
 
@@ -57,6 +61,7 @@ export async function enviarPushDeAlerta(alertId) {
     include: {
       group: { select: { name: true } },
       device: { select: { name: true, deviceCode: true } },
+      createdBy: { select: { email: true, displayName: true } },
       notifications: {
         where: { status: "PENDING" },
         include: { user: { select: { id: true, pushTokens: true } } },
@@ -107,7 +112,8 @@ export async function enviarPushDeAlerta(alertId) {
         tag: `alerta-${alerta.id}`,
         // Una emergencia no se auto-descarta a los segundos.
         requireInteraction: true,
-        icon: "/favicon.svg",
+        // PNG: Android no muestra SVG en notificaciones.
+        icon: "/pwa-192x192.png",
       },
       // Al tocar el aviso se abre la PWA en vez de una pestaña en blanco.
       fcmOptions: { link: process.env.FRONTEND_ORIGIN?.split(",")[0] || "http://localhost:5173" },

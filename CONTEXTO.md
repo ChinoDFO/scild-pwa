@@ -41,6 +41,16 @@ directo con los usuarios; todo pasa por el backend.
 - **Device Secret nunca se guarda ni compara en texto plano**: se guarda su
   hash (bcrypt). El ESP32 nunca puede generar una alerta solo con su ID
   público — necesita el secreto real.
+- **Tiempo real con Socket.IO, pero solo de bajada.** El socket únicamente
+  *avisa* a la PWA (mensaje nuevo, alerta nueva o cambiada, grupo editado).
+  Todo lo que el usuario *hace* sigue yendo por la API HTTP, donde están la
+  validación, los permisos y el rate limiting: un solo camino que mantener.
+- **El chat NO manda push.** Si cada mensaje hiciera sonar el celular, la
+  gente silenciaría la app y se perdería las alertas de verdad. El push se
+  reserva para emergencias.
+- **Catálogo de tipos de alerta en el backend** (`src/tiposAlerta.js`), no
+  como enum de Prisma: agregar o quitar opciones no requiere migración y la
+  PWA arma su menú pidiéndolo a la API.
 
 ## 3. Repos
 
@@ -48,9 +58,14 @@ directo con los usuarios; todo pasa por el backend.
 |---|---|---|---|
 | `scild-web` | Tienda/pedidos (sin tocar) | `PP/scild-web` | https://github.com/ChinoDFO/SCILD-web |
 | `scild-backend` | Backend del sistema de emergencia (este repo) | `PP/scild-backend` | https://github.com/ChinoDFO/scild-pwa |
-| `scild-emergencia` | Frontend del sistema de emergencia (login, dashboard, etc.) | `PP/scild-emergencia` | **todavía no está en GitHub** — pendiente |
+| `scild-emergencia` | Frontend del sistema de emergencia (PWA instalable) | `PP/scild-emergencia` | https://github.com/ChinoDFO/scild-emergencia |
 
 ## 4. Qué ya funciona (implementado y probado)
+
+**Hito (2026-09-17): el flujo central funciona de punta a punta.** Una alerta
+creada en el backend llegó como notificación push real a la PWA en Chrome
+(Windows), con la app abierta y con la app cerrada. Para el flujo completo
+faltan el ESP32 físico real y tener todo publicado con HTTPS (ver roadmap).
 
 ### Backend (`scild-backend`)
 
@@ -71,13 +86,62 @@ directo con los usuarios; todo pasa por el backend.
   <idToken>` de Firebase):
   - `GET /api/auth/me` — perfil + grupos del usuario (se autocrea en
     Postgres la primera vez que llega un token válido).
+  - `PATCH /api/auth/me` `{ displayName }` — el **apodo** con el que los
+    demás ven a la persona ("Mamá", "Cajero"); máx. 40 caracteres. Sale en
+    el chat, en la lista de miembros y en el push de sus alertas.
   - `POST /api/groups` — crea un grupo/establecimiento, el creador queda
-    como `ADMIN`.
+    como `ADMIN`. **Nombre y dirección son obligatorios** (la dirección es
+    lo que se necesita para llegar en una emergencia). La columna sigue
+    siendo opcional en la base porque hay grupos viejos sin dirección; la
+    app le pide al admin que la agregue.
+  - `PATCH /api/groups/:id` — solo ADMIN (403 si eres miembro, 404 si no
+    eres del grupo): edita nombre, dirección y coordenadas. No deja la
+    dirección vacía. Queda en `AuditLog`.
+  - `POST /api/groups/:id/invite-code` — solo ADMIN: genera un código de
+    invitación nuevo y el anterior deja de servir.
+  - `GET /api/groups/:id/messages` (`?antesDe=<fecha ISO>` para paginar de
+    50 en 50) y `POST /api/groups/:id/messages` `{ content }` — **chat del
+    grupo** (máx. 1000 caracteres). Cada mensaje nuevo se reparte al
+    instante por Socket.IO.
   - `POST /api/groups/join` — se une a un grupo con `inviteCode` (404 si
     no existe, 409 si ya es miembro).
   - `POST /api/notifications/token` — registra el token de FCM del
     navegador actual (se reasigna si ya existía bajo otra cuenta).
   - `DELETE /api/notifications/token` — lo borra al cerrar sesión.
+  - `GET /api/groups/:id` — detalle: miembros, botones con estado
+    **derivado** (`OFFLINE` si lleva >3× `heartbeatInterval` sin señal,
+    `IRREGULAR` si >1.5×) y `inviteCode` solo si eres ADMIN.
+  - `GET /api/alerts/tipos` — catálogo de tipos de alerta (🚨 Emergencia,
+    🚗 Carro sospechoso, 👤 Personas sospechosas, 🚔 Robo o asalto,
+    🔥 Incendio, 🚑 Emergencia médica). Se edita en `src/tiposAlerta.js`;
+    `GENERAL` debe existir siempre (es el del botón físico).
+  - `GET /api/alerts` (`?groupId=`, `?soloAbiertas=true`) — alertas de tus
+    grupos; es la fuente de verdad para quien no tiene push. Cada alerta
+    trae `tipo: { id, etiqueta, emoji }` ya resuelto.
+  - `POST /api/alerts` `{ groupId, type }` — alerta manual (`source: APP`)
+    del tipo elegido (`GENERAL` si no viene; 400 si no existe en el
+    catálogo). Avisa a todos los miembros menos a quien la generó. El push
+    dice qué pasa: título "🚗 Carro sospechoso", cuerpo "Mamá reportó carro
+    sospechoso en Casa Flores".
+  - `POST /api/alerts/:id/atender` y `/resolver` — ACTIVE → ACKNOWLEDGED →
+    RESOLVED, a prueba de doble clic simultáneo (409). Resolver la última
+    alerta abierta de un botón lo saca de `EMERGENCY` (antes nada lo hacía:
+    el heartbeat conserva ese estado). Quién hizo qué queda en `AuditLog`.
+- **Tiempo real (`src/realtime.js`, Socket.IO en el mismo puerto que la
+  API)**: el socket se autentica con el mismo ID token de Firebase y entra
+  solo a las salas de los grupos del usuario (nadie escucha un grupo
+  ajeno). Eventos: `mensaje:nuevo`, `alertas:cambio` (alerta creada por
+  la app o por el botón, atendida o resuelta) y `grupo:actualizado`.
+  Si la PWA se une a un grupo después de conectarse, pide la sala con
+  `grupo:entrar` (se verifica la membresía).
+  - Los handlers se registran **antes** de cualquier `await` en la
+    conexión: un evento que llega sin handler se pierde sin aviso (pasó
+    con `grupo:entrar`, lo detectó la prueba end-to-end).
+  - Igual que Express 4, Socket.IO no atrapa promesas rechazadas: cada
+    handler async tiene su try/catch para no tumbar el proceso.
+- **Express 5**: con Express 4 cualquier error en una ruta async (p. ej.
+  Neon tardando en despertar) tumbaba el proceso entero, incluido `/panic`.
+  Ahora hay un manejador de errores que responde JSON y el servidor sigue.
 - **Notificaciones push (FCM)**, en `src/push.js`:
   - `/panic` crea la `Alert` y, en la **misma transacción**, una
     `Notification` PENDING por cada miembro del grupo. Así queda registro
@@ -92,17 +156,33 @@ directo con los usuarios; todo pasa por el backend.
   - Miembros sin ningún token registrado se quedan en `PENDING` a
     propósito: no es un fallo de envío, la alerta les debe aparecer dentro
     de la app cuando entren.
+  - El aviso lleva `tag` por alerta (si llega por varios lados no se
+    apila), `requireInteraction` (una emergencia no se auto-descarta) e
+    ícono PNG (`/pwa-192x192.png`; Android no muestra SVG).
 - Seguridad: Helmet, rate limiting (30 req/min dispositivos, 120 req/min
-  usuarios), CORS restringido al origen del frontend.
-- `scripts/createDevice.js` — da de alta un dispositivo de prueba (crea su
-  grupo si no existe) e imprime el `deviceSecret` en claro una sola vez.
+  usuarios) y CORS:
+  - **Producción**: define `FRONTEND_ORIGIN` (separado por comas si son
+    varios) y solo esos orígenes pasan.
+  - **Desarrollo** (sin `FRONTEND_ORIGIN`): se acepta `localhost` en
+    cualquier puerto. Antes solo pasaba el 5173, y cuando Vite se brincaba
+    solo al 5174 (porque el 5173 estaba ocupado) todo fallaba con CORS.
+- `scripts/createDevice.js` (`npm run device:create -- BTN-001 "Grupo"`) —
+  da de alta un dispositivo de prueba (crea su grupo si no existe) e imprime
+  el `deviceSecret` en claro una sola vez.
+- `scripts/sendTestAlert.js` (`npm run alert:test -- "Abarrotes Flores"
+  INCENDIO`; el tipo es opcional) — manda una alerta **real** de prueba a
+  todos los miembros del grupo, por el mismo camino que `/panic`. Sirve para probar el push sin el ESP32. La
+  alerta queda activa para poder probar "Ya voy" / "Marcar resuelta".
 
 ### Frontend (`scild-emergencia`)
 
 Proyecto nuevo: React + TypeScript + Vite + Tailwind v4 + React Router.
 
 - `Login.tsx` / `Registro.tsx` — formularios contra Firebase Auth, con
-  mensajes de error en español por cada código de error.
+  mensajes de error en español por cada código de error. El registro pide
+  el **apodo** ("¿Cómo te van a ver en tu grupo?"). Si no se pudo guardar,
+  o la cuenta es de antes, Inicio lo vuelve a pedir (`components/Apodo.tsx`,
+  que también permite cambiarlo).
 - `AuthContext.tsx` — sesión global (`onAuthStateChanged`).
 - `RutaProtegida.tsx` — redirige a `/login` si no hay sesión.
 - `Inicio.tsx` — pantalla protegida que llama a `GET /api/auth/me` para
@@ -114,14 +194,85 @@ Proyecto nuevo: React + TypeScript + Vite + Tailwind v4 + React Router.
   cuatro estados posibles (no soportado / desactivadas / bloqueadas /
   activadas) y muestra la alerta en pantalla cuando llega con la app
   abierta, porque en primer plano el navegador no dibuja el aviso del
-  sistema.
-- `public/firebase-messaging-sw.js` — service worker que recibe las alertas
-  con la app cerrada. No pasa por Vite, así que recibe la config de
-  Firebase en la query string con la que se registra, en vez de llevarla
-  hardcodeada.
+  sistema. Dos detalles importantes:
+  - Sacar **y** borrar el token siempre usa el registro del service worker
+    de la app. Antes, al cerrar sesión se pedía el token sin él, Firebase
+    registraba otro SW, devolvía un token distinto y el real se quedaba en
+    el backend: ese navegador seguía recibiendo las alertas de quien ya
+    había salido.
+  - `onMessage` de Firebase solo guarda **un** handler (llamarlo de nuevo
+    reemplaza al anterior), así que `escucharAlertasEnPrimerPlano` lo
+    registra una vez y reparte el aviso a todos los que escuchan.
+- `pages/Grupo.tsx` — arriba el botón de alerta y debajo tres pestañas
+  (**Alertas / Chat / Info**, en la URL como `?tab=chat` para poder
+  enlazarlas):
+  - `components/BotonAlerta.tsx` — botón grande "(!) Enviar alerta" que
+    abre el menú "¿Qué está pasando?" con los tipos del catálogo; al tocar
+    uno la alerta sale de inmediato. Son dos toques deliberados (abrir y
+    elegir): no se dispara con el celular en la bolsa y no mete un tercer
+    "¿confirmas?" cuando cada segundo cuenta. Si el catálogo no carga, queda
+    al menos "Emergencia".
+  - `components/ListaAlertas.tsx` — alertas con emoji y tipo, quién la
+    reportó, y "Ya voy" / "Marcar resuelta".
+  - `components/Chat.tsx` — chat del grupo en tiempo real: tus mensajes a
+    la derecha, los demás con su apodo, "Ver mensajes anteriores", no te
+    jala hacia abajo si estás leyendo mensajes viejos, y al reconectarse
+    vuelve a pedir lo que se perdió.
+  - `components/InfoGrupo.tsx` — establecimiento (el ADMIN lo edita),
+    enlace a Google Maps, botones con su estado, miembros con apodo, y el
+    código de invitación con "Copiar" y "Nuevo código" (solo ADMIN).
+- `components/GestionGrupos.tsx` — crear establecimiento / unirse con código
+  (en `Inicio.tsx`, junto con la lista de alertas abiertas de todos tus
+  grupos). La dirección es obligatoria al crear.
+- `services/tiempoReal.ts` — una sola conexión Socket.IO para toda la app
+  (se abre al primer uso, se cierra al cerrar sesión) y los hooks
+  `useEventoTiempoReal` / `useAlReconectar`. En cada reconexión manda un ID
+  token fresco. Reintenta sola en los dos casos en que Socket.IO no lo hace
+  (el servidor cortó la conexión o la rechazó al conectar). Las listas se
+  actualizan al instante por el socket; el refresco cada 60 s, al volver a
+  la pestaña y al llegar un push quedan solo como respaldo.
+- **Instalable (`vite-plugin-pwa`, estrategia `injectManifest`)**: hay UN
+  solo service worker, `src/sw/sw.ts`, que precachea la app (abre sin red,
+  también en rutas como `/grupos/:id`) y recibe el push de FCM con la app
+  cerrada. Reemplazó a `public/firebase-messaging-sw.js`: solo cabe un SW por
+  scope, y si el plugin generara el suyo, las alertas dejarían de llegar.
+  Como ahora pasa por Vite, lee la config de `import.meta.env`. Se registra
+  al arrancar en `main.tsx` y `notificaciones.ts` usa ese mismo registro.
+  Se actualiza solo (`autoUpdate` + `skipWaiting`). Tiene su propio
+  `tsconfig.sw.json` porque corre sin DOM.
+- Al tocar la notificación se enfoca la PWA si ya está abierta (en la
+  pantalla que sea) o se abre. Ese handler se registra **antes** que
+  Firebase a propósito: el del SDK corta la propagación del evento y solo
+  enfoca una ventana si su URL coincide exacto, así que el handler que había
+  en el SW anterior nunca llegaba a ejecutarse.
+- Íconos PNG en `public/`, generados desde `public/icono.svg` con
+  `npx pwa-assets-generator` (config en `pwa-assets.config.ts`). Si cambias
+  el ícono, edita el SVG y vuelve a correr ese comando.
 
-Todo esto se probó de punta a punta en navegador: registro real, logout,
-login con contraseña incorrecta (rechaza bien) y correcta (entra bien).
+### Cómo se probó
+
+- Registro real, logout, login con contraseña incorrecta (rechaza bien) y
+  correcta (entra bien).
+- Grupos y alertas: script end-to-end contra Neon y Firebase reales (23
+  chequeos): crear grupo, unirse con código, que un usuario ajeno reciba 404
+  en todo, heartbeat y pánico de un botón simulado, estados derivados,
+  atender/resolver (incluido el 409 por doble clic), que el botón salga de
+  `EMERGENCY`, que la alerta manual no le avise a quien la generó, la
+  auditoría, y que un JSON roto responda 400 sin tumbar el servidor. Los
+  usuarios de prueba se crean con Firebase Admin + *custom tokens* (sin
+  contraseñas) y se borran al final junto con sus datos.
+- Chat, tipos de alerta, apodos, edición de grupo y tiempo real: segunda
+  prueba end-to-end (42 chequeos) con tres usuarios y **sockets reales**:
+  validaciones (apodo, dirección, mensaje vacío o largo, tipo inventado),
+  permisos (miembro 403 al editar, ajeno 404 en todo y sin recibir nada por
+  el socket, token falso rechazado), que el código viejo deje de servir,
+  que los mensajes y cambios de alertas lleguen en vivo, y la paginación
+  del chat. Luego en el navegador: menú de alerta → "Incendio", mensaje de
+  otro usuario apareciendo sin recargar, edición de la dirección, apodos.
+- Push: alertas reales con `npm run alert:test`, recibidas en Chrome con la
+  app abierta y cerrada.
+- PWA: build de producción con `vite preview` → un solo SW activo en `/`,
+  manifest válido, app en caché y rutas como `/grupos/:id` cargando sin red.
 
 ## 5. Cómo levantar el proyecto localmente
 
@@ -131,7 +282,7 @@ Necesitas correr backend y frontend al mismo tiempo (dos terminales):
 # Terminal 1 — backend
 cd scild-backend
 npm install
-npx prisma generate
+npx prisma generate   # OJO: repetirlo cada vez que un pull traiga cambios al schema
 npm run dev        # http://localhost:3000
 
 # Terminal 2 — frontend
@@ -153,6 +304,26 @@ por un canal privado, nunca por chat público ni commiteados):
   web (Firebase Console → Cloud Messaging → Certificados push web) y
   `VITE_API_URL=http://localhost:3000`.
 
+Cosas que ya nos hicieron perder tiempo:
+
+- **Después de un pull que cambie `prisma/schema.prisma`, corre `npx prisma
+  generate` con el backend detenido.** Si el cliente de Prisma queda viejo,
+  el backend arranca pero truena en cuanto toca un modelo nuevo (pasó con
+  `PushToken`: el push fallaba siempre). En Windows, con el backend
+  corriendo, `generate` falla con `EPERM` porque el DLL está en uso.
+- **Fíjate en qué puerto quedó Vite.** Si el 5173 está ocupado se va solo al
+  5174. El backend ya lo acepta en desarrollo, pero el permiso de
+  notificaciones del navegador es por puerto: lo que activaste en uno no
+  cuenta en el otro.
+- En la consola de desarrollo salen avisos de Workbox ("precaching URLs
+  without revision info", "Router is responding to"). Son solo de modo dev;
+  en el build de producción no aparecen.
+- Con `npm run dev`, el backend se reinicia solo al cambiar el código,
+  **pero no** al regenerar Prisma: después de `npx prisma generate`
+  reinícialo a mano (o guarda cualquier archivo de `src/`).
+- Si FCM acepta el envío pero no ves el aviso, revisa Windows: Configuración
+  → Sistema → Notificaciones (Chrome permitido, "No molestar" apagado).
+
 Nota para Windows: si el proyecto vive dentro de OneDrive, `npm run dev` del
 backend se reinicia solo cada rato, porque `node --watch` ve los archivos que
 OneDrive sincroniza en `node_modules`. Se acota con
@@ -166,24 +337,52 @@ iOS, no solo por comodidad).
 
 ## 6. Qué falta (roadmap inmediato)
 
-En orden sugerido, retomando el plan por etapas de la propuesta original:
+Ya hecho: alerta manual, pantallas de grupos, atender/resolver alertas,
+PWA instalable con push funcionando, chat del grupo en tiempo real, tipos
+de alerta, apodos, edición del grupo por el admin y dirección obligatoria.
+En orden sugerido:
 
-1. **Endpoint de alerta manual** — el `AlertSource.APP` ya existe en el
-   schema y `push.js` ya sabe redactar el aviso para ese caso, pero falta
-   el `POST /api/alerts` que lo dispare desde la PWA.
-2. **Pantallas de grupos en el frontend** — crear grupo / unirse con
-   código de invitación (el backend ya lo soporta, falta la UI).
-3. **Pantallas de dispositivos** — ver estado, última conexión, historial,
-   configuración básica.
-4. **Ubicación** — guardar dirección/coordenadas del grupo y mostrar
-   enlace a Google Maps.
-5. **Chat grupal** — Socket.IO + tabla `Message` (ya existe en el schema).
-6. **`vite-plugin-pwa`** — hacer instalable la app (manifest, service
-   worker, ícono).
-7. **Página-tutorial de instalación en `scild-web`** — nueva opción junto
-   a "Gestionar pedidos" que explique cómo instalar esta PWA.
-8. **Firmware real del ESP32** — que efectivamente llame a
-   `/api/devices/heartbeat`, `/panic` y `/status` con sus credenciales.
+1. **Publicar con HTTPS (deploy).** Es lo que desbloquea todo lo demás: sin
+   HTTPS no hay push ni instalación en celulares (solo funcionan en
+   `localhost`), el ESP32 necesita un backend público al que llamar, y el
+   tutorial de `scild-web` necesita una URL real a la cual mandar. Opción
+   propuesta: frontend en **Firebase Hosting** (ya usamos ese proyecto de
+   Firebase; es estático y con HTTPS gratis) y backend en un servicio de
+   Node como **Render** o **Railway**. Pendientes técnicos del deploy:
+   - `firebaseAdmin.js` hoy lee la clave de servicio de un **archivo**; en
+     el hosting conviene leerla de una variable de entorno.
+   - Definir `FRONTEND_ORIGIN` en el backend y `VITE_API_URL` en el build
+     del frontend con las URLs reales.
+   - Agregar el dominio publicado a los dominios autorizados de Firebase
+     Auth.
+   - Los planes gratuitos "duermen" el backend tras un rato sin tráfico, y
+     el primer `/panic` tardaría varios segundos. En emergencias hay que
+     evitarlo (plan que no duerma, o que el heartbeat de los botones lo
+     mantenga despierto).
+2. **Vincular botones desde la app** — hoy solo se dan de alta con
+   `scripts/createDevice.js`; falta que el ADMIN lo haga desde la PWA
+   (p. ej. con un código impreso en la caja del botón).
+3. **Firmware real del ESP32** — que llame a `/api/devices/heartbeat`,
+   `/panic` y `/status` con sus credenciales (necesita el backend
+   publicado, punto 1).
+4. **Página-tutorial de instalación en `scild-web`** — nueva opción junto
+   a "Gestionar pedidos" que explique cómo instalar esta PWA (necesita la
+   URL publicada, punto 1).
+5. **Confiabilidad de las alertas:**
+   - Reintentar las `Notification` que quedaron en `PENDING`/`FAILED` (hoy
+     solo se intenta una vez).
+   - Avisar cuando un botón pasa a `OFFLINE`: un botón apagado es un riesgo
+     silencioso, nadie se entera hasta que se necesita.
+6. **Pantallas de dispositivos** — ya se ve estado/última señal/batería;
+   falta historial (`DeviceEvent`) y configuración básica.
+7. **Ubicación** — ya hay enlace a Google Maps con la dirección; falta
+   capturar coordenadas y editar la dirección después de crear el grupo.
+8. **Mejoras al chat y a los grupos** (ideas, no urgentes):
+   - Contador de mensajes sin leer (hoy el chat no avisa nada fuera de la
+     pestaña, a propósito, para no competir con las alertas).
+   - Que el admin pueda sacar a alguien del grupo o nombrar a otro admin.
+   - Nota opcional al enviar una alerta ("camioneta gris, placas…").
+   - Apodo por grupo (hoy es uno por persona para todos sus grupos).
 
 ## 7. Notas de seguridad para quien se una
 
