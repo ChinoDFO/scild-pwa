@@ -203,24 +203,37 @@ Proyecto nuevo: React + TypeScript + Vite + Tailwind v4 + React Router.
   - `onMessage` de Firebase solo guarda **un** handler (llamarlo de nuevo
     reemplaza al anterior), así que `escucharAlertasEnPrimerPlano` lo
     registra una vez y reparte el aviso a todos los que escuchan.
-- `pages/Grupo.tsx` — arriba el botón de alerta y debajo tres pestañas
-  (**Alertas / Chat / Info**, en la URL como `?tab=chat` para poder
-  enlazarlas):
-  - `components/BotonAlerta.tsx` — botón grande "(!) Enviar alerta" que
-    abre el menú "¿Qué está pasando?" con los tipos del catálogo; al tocar
-    uno la alerta sale de inmediato. Son dos toques deliberados (abrir y
-    elegir): no se dispara con el celular en la bolsa y no mete un tercer
-    "¿confirmas?" cuando cada segundo cuenta. Si el catálogo no carga, queda
-    al menos "Emergencia".
-  - `components/ListaAlertas.tsx` — alertas con emoji y tipo, quién la
-    reportó, y "Ya voy" / "Marcar resuelta".
-  - `components/Chat.tsx` — chat del grupo en tiempo real: tus mensajes a
-    la derecha, los demás con su apodo, "Ver mensajes anteriores", no te
-    jala hacia abajo si estás leyendo mensajes viejos, y al reconectarse
-    vuelve a pedir lo que se perdió.
-  - `components/InfoGrupo.tsx` — establecimiento (el ADMIN lo edita),
-    enlace a Google Maps, botones con su estado, miembros con apodo, y el
-    código de invitación con "Copiar" y "Nuevo código" (solo ADMIN).
+- `pages/Grupo.tsx` — **una sola pantalla al estilo de una app de
+  mensajería** (parecida a WhatsApp en la forma de usarse, pero con
+  colores, fondo e íconos propios: encabezado oscuro, rojo SCILD, burbujas
+  rosadas, patrón de escudos/campanas/casas):
+  - **Encabezado**: nombre del grupo y sus miembros ("Tú, Papá, Luis"). Si
+    se cae la conexión en tiempo real dice "Conectando…". Al tocarlo se abre
+    la info del grupo (`components/InfoGrupo.tsx`: establecimiento editable
+    por el ADMIN, Google Maps, botones, miembros y código de invitación).
+  - **Botón SOS** (`components/BotonPanico.tsx`): círculo rojo grande justo
+    debajo del encabezado. Se **mantiene presionado 1 segundo** (un anillo
+    se va llenando) y manda una alerta `GENERAL` al instante, sin menú ni
+    confirmación. El segundo evita que un roce accidental despierte a todo
+    el grupo; se cambia en `MANTENER_MS`. Quien dispara la alerta es un
+    `setTimeout`, no la animación: el navegador pausa
+    `requestAnimationFrame` si la página no está visible. Funciona también
+    con teclado (mantener Espacio/Enter) y vibra al empezar y al enviar.
+  - **Alertas abiertas fijas** debajo del SOS, con "Ya voy" y "Resuelta",
+    para atenderlas sin buscarlas.
+  - **Conversación** (`components/Conversacion.tsx`): mensajes y alertas en
+    una sola línea de tiempo, agrupada por día ("Hoy", "Ayer"...) con la
+    etiqueta del día fija arriba mientras se ven sus mensajes. Las alertas
+    salen como tarjetas con su estado. Se queda pegada abajo al llegar algo
+    nuevo o al abrirse el teclado (salvo que estés leyendo mensajes viejos).
+  - **Caja de mensaje** abajo: crece con el texto; Enter envía y
+    Shift+Enter hace salto de línea. A la derecha, donde WhatsApp pone el
+    micrófono, va un botón rojo **"!"** que abre el menú "¿Qué está
+    pasando?" (`components/MenuAlertas.tsx`) con los tipos del catálogo en
+    círculos; al tocar uno la alerta sale de inmediato. Si hay texto
+    escrito, ese botón cambia a "enviar".
+  - La lógica vive en hooks reutilizables: `hooks/useAlertas.ts` (también
+    lo usa la lista de Inicio) y `hooks/useMensajes.ts`.
 - `components/GestionGrupos.tsx` — crear establecimiento / unirse con código
   (en `Inicio.tsx`, junto con la lista de alertas abiertas de todos tus
   grupos). La dirección es obligatoria al crear.
@@ -231,6 +244,11 @@ Proyecto nuevo: React + TypeScript + Vite + Tailwind v4 + React Router.
   (el servidor cortó la conexión o la rechazó al conectar). Las listas se
   actualizan al instante por el socket; el refresco cada 60 s, al volver a
   la pestaña y al llegar un push quedan solo como respaldo.
+  `useConexionTiempoReal` alimenta el "Conectando…" del encabezado.
+- `index.html` usa `interactive-widget=resizes-content` para que en Android
+  la pantalla se ajuste al abrir el teclado y la caja de mensaje no quede
+  tapada. El color de la barra de estado (`theme-color`, también en el
+  manifest de `vite.config.ts`) es el mismo gris oscuro del encabezado.
 - **Instalable (`vite-plugin-pwa`, estrategia `injectManifest`)**: hay UN
   solo service worker, `src/sw/sw.ts`, que precachea la app (abre sin red,
   también en rutas como `/grupos/:id`) y recibe el push de FCM con la app
@@ -269,6 +287,12 @@ Proyecto nuevo: React + TypeScript + Vite + Tailwind v4 + React Router.
   que los mensajes y cambios de alertas lleguen en vivo, y la paginación
   del chat. Luego en el navegador: menú de alerta → "Incendio", mensaje de
   otro usuario apareciendo sin recargar, edición de la dirección, apodos.
+- Pantalla estilo mensajería: en el navegador con tamaño de celular
+  (375×812) y una familia de prueba (mensajes de ayer y hoy, una alerta
+  resuelta y una activa): soltar el SOS antes del segundo no envía nada y
+  mantenerlo sí; menú "!" → tipos; Enter envía; info del grupo desde el
+  encabezado; "Resuelta" quita la alerta de las fijas; y con el backend
+  apagado el encabezado dice "Conectando…" y se recupera solo al volver.
 - Push: alertas reales con `npm run alert:test`, recibidas en Chrome con la
   app abierta y cerrada.
 - PWA: build de producción con `vite preview` → un solo SW activo en `/`,
@@ -315,6 +339,9 @@ Cosas que ya nos hicieron perder tiempo:
   5174. El backend ya lo acepta en desarrollo, pero el permiso de
   notificaciones del navegador es por puerto: lo que activaste en uno no
   cuenta en el otro.
+- Si ves muchos `ERR_CONNECTION_REFUSED` a `localhost:3000/socket.io` en la
+  consola, el backend está apagado (la app sigue abriendo porque la PWA
+  queda en caché). Levántalo y se reconecta sola.
 - En la consola de desarrollo salen avisos de Workbox ("precaching URLs
   without revision info", "Router is responding to"). Son solo de modo dev;
   en el build de producción no aparecen.
