@@ -36,7 +36,13 @@ export function iniciarTiempoReal(servidorHttp) {
     // Los handlers se registran ANTES de cualquier await: el cliente puede
     // emitir en cuanto se conecta, y un evento que llega sin handler se
     // pierde sin aviso.
-    //
+
+    // Qué grupo trae abierto en pantalla. Sirve para no mandarle push de
+    // chat a quien ya está leyendo esa conversación.
+    socket.on("grupo:viendo", (groupId) => {
+      socket.data.viendo = typeof groupId === "string" ? groupId : null;
+    });
+
     // Para grupos a los que se unió DESPUÉS de conectarse. Se revisa la
     // membresía: nadie escucha la sala de un grupo ajeno.
     socket.on("grupo:entrar", async (groupId, responder) => {
@@ -76,4 +82,13 @@ export function emitirAGrupo(groupId, evento, datos) {
   } catch (e) {
     console.error(`No se pudo emitir ${evento} al grupo ${groupId}:`, e);
   }
+}
+
+// ¿Esta persona tiene ese grupo abierto en alguna de sus pantallas?
+export function estaViendoGrupo(userId, groupId) {
+  if (!io) return false;
+  for (const socket of io.sockets.sockets.values()) {
+    if (socket.data.user?.id === userId && socket.data.viendo === groupId) return true;
+  }
+  return false;
 }

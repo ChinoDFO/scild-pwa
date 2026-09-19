@@ -1,5 +1,6 @@
 import { firebaseMessaging } from "./firebaseAdmin.js";
 import prisma from "./prisma.js";
+import { estaViendoGrupo } from "./realtime.js";
 import { tipoDeAlerta } from "./tiposAlerta.js";
 
 // Códigos con los que FCM avisa que un token ya no sirve: la PWA se
@@ -164,4 +165,94 @@ export async function enviarPushDeAlerta(alertId) {
     fallidas: idsFallidas.length,
     tokensBorrados: tokensMuertos.length,
   };
+}
+
+// --- Avisos del chat ---------------------------------------------------------
+
+const MAX_VISTA_PREVIA = 120;
+// Más de esto y ya no tiene caso dar el número exacto.
+const TOPE_SIN_LEER = 50;
+
+// Borra de la base los tokens que FCM reportó como muertos.
+async function limpiarTokensMuertos(respuesta, tokens) {
+  const muertos = respuesta.responses
+    .map((r, i) => (!r.success && CODIGOS_TOKEN_MUERTO.has(r.error?.code) ? tokens[i] : null))
+    .filter(Boolean);
+  if (muertos.length) await prisma.pushToken.deleteMany({ where: { token: { in: muertos } } });
+  return muertos.length;
+}
+
+// El texto del aviso: con un solo mensaje sin leer se muestra el mensaje;
+// con varios, cuántos son. El nombre de quien escribe va en el cuerpo porque
+// el título lo ocupa el grupo.
+export function cuerpoDeAvisoDeChat(sinLeer, mensaje) {
+  if (sinLeer > 1) {
+    return `${sinLeer >= TOPE_SIN_LEER ? `${TOPE_SIN_LEER}+` : sinLeer} mensajes nuevos`;
+  }
+  const recorte = mensaje.content.slice(0, MAX_VISTA_PREVIA);
+  return `${mensaje.autor.nombre}: ${recorte}${mensaje.content.length > MAX_VISTA_PREVIA ? "…" : ""}`;
+}
+
+// Aviso de un mensaje nuevo del chat. A diferencia de una alerta:
+//   - no despierta a quien ya trae el grupo abierto en pantalla;
+//   - se agrupa por grupo (tag), así que varios mensajes seguidos no llenan
+//     la pantalla de avisos: el último reemplaza al anterior;
+//   - no lleva requireInteraction, para que se pueda descartar solo. Una
+//     emergencia se tiene que ver distinta de un "ya voy para allá".
+// Si la persona trae un solo mensaje sin leer se muestra el texto; si trae
+// varios, "N mensajes nuevos".
+export async function enviarPushDeMensaje(mensaje) {
+  const { groupId } = mensaje;
+
+  const [grupo, miembros, recientes] = await Promise.all([
+    prisma.group.findUnique({ where: { id: groupId }, select: { name: true } }),
+    prisma.groupMember.findMany({
+      where: { groupId, userId: { not: mensaje.autor.id } },
+      select: { userId: true, lastReadAt: true, user: { select: { pushTokens: { select: { token: true } } } } },
+    }),
+    // Una sola consulta para calcular los no leídos de todos: los últimos
+    // mensajes del grupo, y para cada quien se cuentan los posteriores a su
+    // última lectura.
+    prisma.message.findMany({
+      where: { groupId },
+      select: { userId: true, createdAt: true },
+      orderBy: { createdAt: "desc" },
+      take: TOPE_SIN_LEER,
+    }),
+  ]);
+
+  // Se manda un solo multicast por cada texto distinto (normalmente dos: el
+  // de quienes traen un mensaje sin leer y el de quienes traen varios).
+  const porTexto = new Map();
+
+  for (const miembro of miembros) {
+    const tokens = miembro.user.pushTokens.map((t) => t.token);
+    if (tokens.length === 0) continue;
+    if (estaViendoGrupo(miembro.userId, groupId)) continue;
+
+    const sinLeer = recientes.filter(
+      (m) => m.userId !== miembro.userId && m.createdAt > miembro.lastReadAt
+    ).length;
+
+    const body = cuerpoDeAvisoDeChat(sinLeer, mensaje);
+    porTexto.set(body, [...(porTexto.get(body) ?? []), ...tokens]);
+  }
+
+  const personas = [...porTexto.values()].reduce((n, t) => n + t.length, 0);
+  let enviados = 0;
+  for (const [body, tokens] of porTexto) {
+    const respuesta = await firebaseMessaging.sendEachForMulticast({
+      tokens,
+      notification: { title: grupo?.name ?? "Mensaje nuevo", body },
+      data: { kind: "chat", groupId, messageId: mensaje.id },
+      webpush: {
+        notification: { tag: `chat-${groupId}`, icon: "/pwa-192x192.png" },
+        fcmOptions: { link: `${process.env.FRONTEND_ORIGIN?.split(",")[0] || "http://localhost:5173"}/grupos/${groupId}` },
+      },
+    });
+    enviados += respuesta.successCount;
+    await limpiarTokensMuertos(respuesta, tokens);
+  }
+
+  return { textos: porTexto.size, tokens: personas, enviados };
 }

@@ -94,6 +94,10 @@ model GroupMember {
   groupId  String
   role     Role     @default(MEMBER)
   joinedAt DateTime @default(now())
+  // Hasta dónde leyó el chat de este grupo. Con esto se sabe cuántos
+  // mensajes trae sin leer y si el aviso push dice el mensaje o
+  // "3 mensajes nuevos".
+  lastReadAt DateTime @default(now())
 
   user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
   group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)

@@ -45,9 +45,12 @@ directo con los usuarios; todo pasa por el backend.
   *avisa* a la PWA (mensaje nuevo, alerta nueva o cambiada, grupo editado).
   Todo lo que el usuario *hace* sigue yendo por la API HTTP, donde están la
   validación, los permisos y el rate limiting: un solo camino que mantener.
-- **El chat NO manda push.** Si cada mensaje hiciera sonar el celular, la
-  gente silenciaría la app y se perdería las alertas de verdad. El push se
-  reserva para emergencias.
+- **El push del chat es distinto al de una emergencia**, para que nadie
+  silencie la app y se pierda una alerta de verdad: los mensajes se agrupan
+  por grupo (el aviso nuevo reemplaza al anterior), se descartan solos, no
+  se le mandan a quien ya trae esa conversación abierta en pantalla, y si
+  hay varios sin leer se resumen en "N mensajes nuevos" en vez de sonar uno
+  por uno. La alerta, en cambio, se queda fija hasta que la toques.
 - **Catálogo de tipos de alerta en el backend** (`src/tiposAlerta.js`), no
   como enum de Prisma: agregar o quitar opciones no requiere migración y la
   PWA arma su menú pidiéndolo a la API.
@@ -85,7 +88,8 @@ faltan el ESP32 físico real y tener todo publicado con HTTPS (ver roadmap).
 - **Endpoints de usuario** (autenticados con `Authorization: Bearer
   <idToken>` de Firebase):
   - `GET /api/auth/me` — perfil + grupos del usuario (se autocrea en
-    Postgres la primera vez que llega un token válido).
+    Postgres la primera vez que llega un token válido). Cada grupo trae
+    `sinLeer`: cuántos mensajes del chat no ha visto.
   - `PATCH /api/auth/me` `{ displayName }` — el **apodo** con el que los
     demás ven a la persona ("Mamá", "Cajero"); máx. 40 caracteres. Sale en
     el chat, en la lista de miembros y en el push de sus alertas.
@@ -99,6 +103,20 @@ faltan el ESP32 físico real y tener todo publicado con HTTPS (ver roadmap).
     dirección vacía. Queda en `AuditLog`.
   - `POST /api/groups/:id/invite-code` — solo ADMIN: genera un código de
     invitación nuevo y el anterior deja de servir.
+  - `PATCH /api/groups/:id/members/:userId` `{ role }` — solo ADMIN: nombra
+    o quita administradores. Nunca deja al grupo sin ninguno (409).
+  - `DELETE /api/groups/:id/members/me` — salir del grupo. Bloquea (409) al
+    único ADMIN si quedan más personas (primero nombra a otro), y si es el
+    último miembro borra el grupo vacío con él, salvo que tenga botones
+    vinculados.
+  - `DELETE /api/groups/:id` — solo ADMIN, y pide el nombre del grupo
+    escrito igual en `confirmarNombre`. Se niega (409) si el grupo tiene
+    botones vinculados: el ESP32 se quedaría sin a quién avisar y su
+    secreto no se puede recuperar (falta "desvincular botón" en el
+    roadmap).
+  - `POST /api/groups/:id/read` — marca el chat como leído hasta ahora.
+    Pone en cero el contador de `GET /api/auth/me` y hace que el siguiente
+    aviso push traiga el mensaje en vez de "N mensajes nuevos".
   - `GET /api/groups/:id/messages` (`?antesDe=<fecha ISO>` para paginar de
     50 en 50) y `POST /api/groups/:id/messages` `{ content }` — **chat del
     grupo** (máx. 1000 caracteres). Cada mensaje nuevo se reparte al
@@ -139,6 +157,10 @@ faltan el ESP32 físico real y tener todo publicado con HTTPS (ver roadmap).
     con `grupo:entrar`, lo detectó la prueba end-to-end).
   - Igual que Express 4, Socket.IO no atrapa promesas rechazadas: cada
     handler async tiene su try/catch para no tumbar el proceso.
+  - `grupo:viendo` le dice al backend qué conversación trae abierta cada
+    quien, y `estaViendoGrupo()` lo usa para no mandarle push de chat a
+    quien ya la está leyendo. `grupo:eliminado` saca de la pantalla a los
+    demás miembros cuando el grupo desaparece.
 - **Express 5**: con Express 4 cualquier error en una ruta async (p. ej.
   Neon tardando en despertar) tumbaba el proceso entero, incluido `/panic`.
   Ahora hay un manejador de errores que responde JSON y el servidor sigue.
@@ -203,6 +225,12 @@ Proyecto nuevo: React + TypeScript + Vite + Tailwind v4 + React Router.
   - `onMessage` de Firebase solo guarda **un** handler (llamarlo de nuevo
     reemplaza al anterior), así que `escucharAlertasEnPrimerPlano` lo
     registra una vez y reparte el aviso a todos los que escuchan.
+- `pages/Ayuda.tsx` + `src/data/ayuda.ts` — apartado de Ayuda con preguntas
+  por secciones (el botón físico, alertas y notificaciones, cuenta y
+  grupos). **El contenido se edita en `src/data/ayuda.ts`**, sin tocar la
+  pantalla: una pregunta con `pendiente: true` sale con el aviso de que
+  falta escribirla, y `CONTACTO` es donde van el teléfono y el correo de
+  soporte cuando se definan.
 - `pages/Grupo.tsx` — **una sola pantalla al estilo de una app de
   mensajería** (parecida a WhatsApp en la forma de usarse, pero con
   colores, fondo e íconos propios: encabezado oscuro, rojo SCILD, burbujas
@@ -234,6 +262,13 @@ Proyecto nuevo: React + TypeScript + Vite + Tailwind v4 + React Router.
     escrito, ese botón cambia a "enviar".
   - La lógica vive en hooks reutilizables: `hooks/useAlertas.ts` (también
     lo usa la lista de Inicio) y `hooks/useMensajes.ts`.
+  - Mientras la pantalla está abierta el chat se marca como leído y el
+    backend no manda push de ese grupo.
+  - `components/InfoGrupo.tsx` cierra con "Salir del grupo" (todos) y
+    "Eliminar grupo" (solo ADMIN, escribiendo el nombre para confirmar), y
+    cada miembro tiene "Hacer admin" / "Quitar admin" para el ADMIN.
+- `Inicio.tsx` muestra un globito rojo con los mensajes sin leer de cada
+  grupo y el enlace a Ayuda.
 - `components/GestionGrupos.tsx` — crear establecimiento / unirse con código
   (en `Inicio.tsx`, junto con la lista de alertas abiertas de todos tus
   grupos). La dirección es obligatoria al crear.
@@ -293,6 +328,11 @@ Proyecto nuevo: React + TypeScript + Vite + Tailwind v4 + React Router.
   mantenerlo sí; menú "!" → tipos; Enter envía; info del grupo desde el
   encabezado; "Resuelta" quita la alerta de las fijas; y con el backend
   apagado el encabezado dice "Conectando…" y se recupera solo al volver.
+- Salir/eliminar grupo, nombrar admin y avisos de chat: tercera prueba
+  end-to-end (31 chequeos). El push del chat se comprueba desde fuera con
+  tokens falsos: FCM los rechaza y el backend los borra, así que el token
+  que sobrevive es justo el de quien NO debía recibir el aviso (quien trae
+  el chat abierto, o el propio autor del mensaje).
 - Push: alertas reales con `npm run alert:test`, recibidas en Chrome con la
   app abierta y cerrada.
 - PWA: build de producción con `vite preview` → un solo SW activo en `/`,
@@ -387,8 +427,11 @@ En orden sugerido:
      evitarlo (plan que no duerma, o que el heartbeat de los botones lo
      mantenga despierto).
 2. **Vincular botones desde la app** — hoy solo se dan de alta con
-   `scripts/createDevice.js`; falta que el ADMIN lo haga desde la PWA
-   (p. ej. con un código impreso en la caja del botón).
+   `scripts/createDevice.js`. Propuesta: un **código de vinculación impreso
+   en la caja**, de un solo uso, que el dueño captura desde la app; el
+   botón queda ligado a esa persona y con el nombre que le ponga. Es lo que
+   también destraba los grupos de comunidad (punto 9) y el "desvincular
+   botón" que hoy impide eliminar un grupo con botones.
 3. **Firmware real del ESP32** — que llame a `/api/devices/heartbeat`,
    `/panic` y `/status` con sus credenciales (necesita el backend
    publicado, punto 1).
@@ -404,10 +447,26 @@ En orden sugerido:
    falta historial (`DeviceEvent`) y configuración básica.
 7. **Ubicación** — ya hay enlace a Google Maps con la dirección; falta
    capturar coordenadas y editar la dirección después de crear el grupo.
-8. **Mejoras al chat y a los grupos** (ideas, no urgentes):
-   - Contador de mensajes sin leer (hoy el chat no avisa nada fuera de la
-     pestaña, a propósito, para no competir con las alertas).
-   - Que el admin pueda sacar a alguien del grupo o nombrar a otro admin.
+8. **Grupos de comunidad (cotos, fraccionamientos)** — un coto donde cada
+   casa tiene su botón. Propuesta acordada a discutir: NO un modelo aparte,
+   sino un `type` en Group (`PERSONAL` | `COMUNIDAD`) que cambia textos y
+   valores por defecto, más un **apodo por grupo**
+   (`GroupMember.nickname`): en comunidad se pide obligatorio al entrar
+   ("¿Cómo se llama tu casa?" → "Casa de Juan") y manda sobre el apodo
+   global; en los personales se sigue usando el global ("Mamá"). El botón
+   de cada casa se vincula con el código de la caja (punto 2) y toma ese
+   nombre, para que la alerta diga "Se presionó Casa de Juan".
+9. **Vista de administrador para el equipo** — fuera de la PWA, como
+   herramienta interna: mismo login de Firebase con un custom claim
+   `admin`, endpoints bajo `/api/admin/*`. Prioridad de contenido:
+   dispositivos (estado/batería/última señal y alta de nuevos), alertas
+   recientes con cuánto tardaron en atenderse, entregas de push fallidas,
+   grupos y auditoría. **Sin mostrar el contenido del chat** y registrando
+   en `AuditLog` todo lo que haga un administrador.
+10. **Mejoras al chat y a los grupos** (ideas, no urgentes):
+   - Que el ADMIN pueda sacar a alguien del grupo (ya puede nombrar y
+     quitar administradores).
+   - Silenciar el chat de un grupo sin salirse de él.
    - Nota opcional al enviar una alerta ("camioneta gris, placas…").
    - Apodo por grupo (hoy es uno por persona para todos sus grupos).
 

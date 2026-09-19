@@ -12,15 +12,25 @@ router.get("/me", userAuth, async (req, res) => {
     include: { group: true },
   });
 
+  // Mensajes sin leer por grupo, para el globito de la lista de grupos.
+  const sinLeer = await Promise.all(
+    memberships.map((m) =>
+      prisma.message.count({
+        where: { groupId: m.groupId, userId: { not: req.user.id }, createdAt: { gt: m.lastReadAt } },
+      })
+    )
+  );
+
   res.json({
     id: req.user.id,
     email: req.user.email,
     displayName: req.user.displayName,
     phone: req.user.phone,
-    groups: memberships.map((m) => ({
+    groups: memberships.map((m, i) => ({
       id: m.group.id,
       name: m.group.name,
       role: m.role,
+      sinLeer: sinLeer[i],
     })),
   });
 });

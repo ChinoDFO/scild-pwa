@@ -5,6 +5,7 @@ import prisma from "../prisma.js";
 import { userAuth } from "../middleware/userAuth.js";
 import { buscarMembresia, estadoEfectivo } from "../membership.js";
 import { emitirAGrupo } from "../realtime.js";
+import { enviarPushDeMensaje } from "../push.js";
 
 const router = Router();
 
@@ -281,6 +282,170 @@ router.post("/:id/messages", userAuth, async (req, res) => {
 
   emitirAGrupo(req.params.id, "mensaje:nuevo", mensaje);
   res.status(201).json(mensaje);
+
+  // Quien escribe obviamente ya leyó lo suyo.
+  marcarLeido(req.user.id, req.params.id).catch((e) =>
+    console.error("No se pudo marcar como leído:", e)
+  );
+
+  // Igual que el push de alertas: después de responder y sin tumbar nada.
+  enviarPushDeMensaje(mensaje)
+    .then((r) => console.log(`Mensaje ${mensaje.id}: push a ${r.tokens} tokens, ${r.enviados} entregados`))
+    .catch((e) => console.error(`No se pudo enviar el push del mensaje ${mensaje.id}:`, e));
+});
+
+function marcarLeido(userId, groupId) {
+  return prisma.groupMember.updateMany({
+    where: { userId, groupId },
+    data: { lastReadAt: new Date() },
+  });
+}
+
+// La PWA lo llama al abrir el chat y al recibir mensajes con él abierto: es
+// lo que hace que el contador de no leídos vuelva a cero y que el próximo
+// aviso push traiga el mensaje y no "N mensajes nuevos".
+router.post("/:id/read", userAuth, async (req, res) => {
+  const { count } = await marcarLeido(req.user.id, req.params.id);
+  if (count === 0) {
+    return res.status(404).json({ error: "Grupo no encontrado" });
+  }
+  res.json({ ok: true });
+});
+
+// --- Salir del grupo, eliminarlo y nombrar administrador --------------------
+
+// Cualquiera puede salirse. Dos casos que hay que cuidar:
+//   - si es el último ADMIN y quedan más personas, el grupo se quedaría sin
+//     nadie que lo administre: primero tiene que nombrar a otro;
+//   - si es el último miembro, el grupo quedaría huérfano (nadie podría
+//     volver a entrar ni atender sus alertas), así que se borra con él. Si
+//     tiene botones vinculados no se borra solo: eso se hace a propósito
+//     desde "Eliminar grupo".
+router.delete("/:id/members/me", userAuth, async (req, res) => {
+  const membresia = await buscarMembresia(req.user.id, req.params.id);
+  if (!membresia) {
+    return res.status(404).json({ error: "Grupo no encontrado" });
+  }
+
+  const [totalMiembros, totalAdmins, totalBotones] = await Promise.all([
+    prisma.groupMember.count({ where: { groupId: req.params.id } }),
+    prisma.groupMember.count({ where: { groupId: req.params.id, role: "ADMIN" } }),
+    prisma.device.count({ where: { groupId: req.params.id } }),
+  ]);
+
+  if (membresia.role === "ADMIN" && totalAdmins === 1 && totalMiembros > 1) {
+    return res.status(409).json({
+      error: "Eres el único administrador. Nombra a otro miembro administrador antes de salir.",
+    });
+  }
+
+  if (totalMiembros === 1 && totalBotones > 0) {
+    return res.status(409).json({
+      error: "Eres el único miembro y el grupo tiene botones vinculados. Elimina el grupo desde la información del grupo.",
+    });
+  }
+
+  const grupoBorrado = totalMiembros === 1;
+
+  await prisma.$transaction(async (tx) => {
+    await tx.auditLog.create({
+      data: { userId: req.user.id, action: "GROUP_LEFT", entity: "Group", entityId: req.params.id },
+    });
+    if (grupoBorrado) {
+      await tx.group.delete({ where: { id: req.params.id } });
+    } else {
+      await tx.groupMember.delete({ where: { id: membresia.id } });
+    }
+  });
+
+  if (grupoBorrado) {
+    emitirAGrupo(req.params.id, "grupo:eliminado", { groupId: req.params.id });
+  } else {
+    emitirAGrupo(req.params.id, "grupo:actualizado", { groupId: req.params.id });
+  }
+
+  res.json({ ok: true, grupoBorrado });
+});
+
+// Solo el ADMIN, y se pide el nombre del grupo escrito igual: borra el chat,
+// las alertas y saca a todos, y no se puede deshacer.
+router.delete("/:id", userAuth, async (req, res) => {
+  if (!(await exigirAdmin(req, res))) return;
+
+  const grupo = await prisma.group.findUnique({
+    where: { id: req.params.id },
+    select: { name: true, _count: { select: { devices: true } } },
+  });
+
+  if (req.body?.confirmarNombre?.trim() !== grupo.name) {
+    return res.status(400).json({ error: `Para confirmar, escribe el nombre del grupo: ${grupo.name}` });
+  }
+
+  // Los botones físicos quedarían sin grupo al que avisar, y su secreto no se
+  // puede recuperar: primero hay que desvincularlos (pendiente en el
+  // roadmap), así que por ahora se bloquea.
+  if (grupo._count.devices > 0) {
+    return res.status(409).json({
+      error: "El grupo tiene botones vinculados. Escríbenos desde Ayuda para desvincularlos antes de eliminarlo.",
+    });
+  }
+
+  emitirAGrupo(req.params.id, "grupo:eliminado", { groupId: req.params.id });
+
+  await prisma.$transaction([
+    prisma.auditLog.create({
+      data: {
+        userId: req.user.id,
+        action: "GROUP_DELETED",
+        entity: "Group",
+        entityId: req.params.id,
+        metadata: { name: grupo.name },
+      },
+    }),
+    prisma.group.delete({ where: { id: req.params.id } }),
+  ]);
+
+  res.json({ ok: true });
+});
+
+// El ADMIN nombra administrador a otro miembro (o le quita el cargo). Es lo
+// que permite que un administrador pueda salirse del grupo.
+router.patch("/:id/members/:userId", userAuth, async (req, res) => {
+  if (!(await exigirAdmin(req, res))) return;
+
+  const { role } = req.body ?? {};
+  if (role !== "ADMIN" && role !== "MEMBER") {
+    return res.status(400).json({ error: "Rol inválido" });
+  }
+
+  const membresia = await buscarMembresia(req.params.userId, req.params.id);
+  if (!membresia) {
+    return res.status(404).json({ error: "Esa persona no es del grupo" });
+  }
+
+  // Nadie puede dejar al grupo sin administrador.
+  if (role === "MEMBER" && membresia.role === "ADMIN") {
+    const admins = await prisma.groupMember.count({ where: { groupId: req.params.id, role: "ADMIN" } });
+    if (admins === 1) {
+      return res.status(409).json({ error: "El grupo necesita al menos un administrador" });
+    }
+  }
+
+  await prisma.$transaction([
+    prisma.groupMember.update({ where: { id: membresia.id }, data: { role } }),
+    prisma.auditLog.create({
+      data: {
+        userId: req.user.id,
+        action: "MEMBER_ROLE_CHANGED",
+        entity: "GroupMember",
+        entityId: membresia.id,
+        metadata: { role, userId: req.params.userId },
+      },
+    }),
+  ]);
+
+  emitirAGrupo(req.params.id, "grupo:actualizado", { groupId: req.params.id });
+  res.json({ ok: true, role });
 });
 
 export default router;
