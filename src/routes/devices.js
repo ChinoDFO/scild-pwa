@@ -40,6 +40,12 @@ router.post("/heartbeat", deviceAuth, async (req, res) => {
 router.post("/panic", deviceAuth, async (req, res) => {
   const device = req.device;
 
+  // Un botón recién salido de fábrica, o desvinculado, no tiene a quién
+  // avisarle. Se responde claro para que el firmware lo pueda mostrar.
+  if (!device.groupId) {
+    return res.status(409).json({ error: "Dispositivo sin vincular a un grupo" });
+  }
+
   const alert = await prisma.$transaction(async (tx) => {
     const createdAlert = await tx.alert.create({
       data: {

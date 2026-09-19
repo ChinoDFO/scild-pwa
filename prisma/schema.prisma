@@ -63,6 +63,7 @@ model User {
   updatedAt   DateTime @updatedAt
 
   memberships       GroupMember[]
+  devices           Device[]       @relation("DeviceOwner")
   messages          Message[]
   alertsCreated     Alert[]        @relation("AlertCreatedBy")
   notifications     Notification[]
@@ -109,11 +110,22 @@ model GroupMember {
 // El Device Secret nunca se guarda en texto plano: solo su hash.
 // El ESP32 se autentica firmando/enviando el secreto y el backend
 // lo compara contra secretHash (bcrypt/argon2), nunca al revés.
+//
+// Un botón existe desde que sale de fábrica, antes de pertenecer a nadie:
+// por eso groupId y ownerId son opcionales. Se llenan cuando alguien lo
+// vincula desde la app con el claimCode impreso en su caja.
 model Device {
   id                String       @id @default(uuid())
   deviceCode        String       @unique
   name              String?
-  groupId           String
+  groupId           String?
+  // Quién lo vinculó. En un coto es el vecino dueño de esa casa.
+  ownerId           String?
+  // El código impreso en la caja. NO cambia al desvincular: el papel de la
+  // caja tiene que seguir sirviendo. claimedAt es lo que dice si ya está en
+  // uso; mientras sea null, quien tenga la caja lo puede vincular.
+  claimCode         String?      @unique
+  claimedAt         DateTime?
   secretHash        String
   status            DeviceStatus @default(OFFLINE)
   firmwareVersion   String?
@@ -123,7 +135,11 @@ model Device {
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
 
-  group          Group                 @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  // SetNull y no Cascade: si un grupo se elimina, el botón físico sigue
+  // existiendo y se puede volver a vincular; borrar su registro haría
+  // inservible el aparato (su secreto no se puede recuperar).
+  group          Group?                @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  owner          User?                 @relation("DeviceOwner", fields: [ownerId], references: [id], onDelete: SetNull)
   alerts         Alert[]
   events         DeviceEvent[]
   configurations DeviceConfiguration[]

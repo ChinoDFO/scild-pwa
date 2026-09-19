@@ -41,6 +41,12 @@ directo con los usuarios; todo pasa por el backend.
 - **Device Secret nunca se guarda ni compara en texto plano**: se guarda su
   hash (bcrypt). El ESP32 nunca puede generar una alerta solo con su ID
   público — necesita el secreto real.
+- **Un botón existe antes de tener dueño.** Se da de alta al prepararlo
+  (sin grupo) con dos códigos: el `deviceSecret`, que va dentro del ESP32,
+  y el **código de vinculación impreso en la caja**, con el que su dueño lo
+  liga a su grupo desde la app sin que nosotros toquemos nada. El código de
+  la caja **no cambia** al desvincular (el papel tiene que seguir
+  sirviendo); lo que dice si está libre u ocupado es `Device.claimedAt`.
 - **Tiempo real con Socket.IO, pero solo de bajada.** El socket únicamente
   *avisa* a la PWA (mensaje nuevo, alerta nueva o cambiada, grupo editado).
   Todo lo que el usuario *hace* sigue yendo por la API HTTP, donde están la
@@ -81,7 +87,9 @@ faltan el ESP32 físico real y tener todo publicado con HTTPS (ver roadmap).
   - `POST /api/devices/heartbeat` — reporta que sigue vivo, actualiza
     batería/firmware/última conexión.
   - `POST /api/devices/panic` — crea una `Alert`, pone el dispositivo en
-    `EMERGENCY`, devuelve el id de la alerta creada.
+    `EMERGENCY`, devuelve el id de la alerta creada. Un botón sin vincular
+    responde 409: no tiene a quién avisarle (el heartbeat sí funciona, para
+    poder probarlo antes de venderlo).
   - `POST /api/devices/status` — reporta estado (`ONLINE`/`MAINTENANCE`
     solamente; `EMERGENCY` solo lo dispara `/panic`, nunca el propio
     dispositivo).
@@ -114,6 +122,14 @@ faltan el ESP32 físico real y tener todo publicado con HTTPS (ver roadmap).
     botones vinculados: el ESP32 se quedaría sin a quién avisar y su
     secreto no se puede recuperar (falta "desvincular botón" en el
     roadmap).
+  - `POST /api/groups/:id/devices/claim` `{ claimCode, name? }` — vincula
+    un botón al grupo con el código de su caja. Lo puede hacer **cualquier
+    miembro** (en un coto, cada vecino vincula el suyo) y queda como su
+    dueño. 409 si ya estaba vinculado, y el mismo 404 exista o no el
+    código, para que nadie ande adivinando códigos.
+  - `DELETE /api/groups/:id/devices/:deviceId` — desvincular. Solo su dueño
+    o el ADMIN del grupo. El botón queda libre y se puede volver a vincular
+    con el mismo código, aquí o en otro grupo.
   - `POST /api/groups/:id/read` — marca el chat como leído hasta ahora.
     Pone en cero el contador de `GET /api/auth/me` y hace que el siguiente
     aviso push traiga el mensaje en vez de "N mensajes nuevos".
@@ -188,9 +204,14 @@ faltan el ESP32 físico real y tener todo publicado con HTTPS (ver roadmap).
   - **Desarrollo** (sin `FRONTEND_ORIGIN`): se acepta `localhost` en
     cualquier puerto. Antes solo pasaba el 5173, y cuando Vite se brincaba
     solo al 5174 (porque el 5173 estaba ocupado) todo fallaba con CORS.
-- `scripts/createDevice.js` (`npm run device:create -- BTN-001 "Grupo"`) —
-  da de alta un dispositivo de prueba (crea su grupo si no existe) e imprime
-  el `deviceSecret` en claro una sola vez.
+- `scripts/createDevice.js` (`npm run device:create -- BTN-001`) — da de
+  alta un botón e imprime sus dos códigos: el `deviceSecret` (va en el
+  ESP32, se muestra **una sola vez**) y el código de vinculación que se
+  imprime en la caja. Pasándole además un nombre de grupo lo deja vinculado
+  de una vez, solo para pruebas. El formato del código de caja está en
+  `src/claimCode.js`: 9 caracteres sin letras que se confundan (sin I, L,
+  O, 0 ni 1), mostrados como ABC-DEF-GHJ, y al capturarlo se aceptan
+  minúsculas, espacios, guiones y el prefijo "SCILD".
 - `scripts/sendTestAlert.js` (`npm run alert:test -- "Abarrotes Flores"
   INCENDIO`; el tipo es opcional) — manda una alerta **real** de prueba a
   todos los miembros del grupo, por el mismo camino que `/panic`. Sirve para probar el push sin el ESP32. La
@@ -264,7 +285,10 @@ Proyecto nuevo: React + TypeScript + Vite + Tailwind v4 + React Router.
     lo usa la lista de Inicio) y `hooks/useMensajes.ts`.
   - Mientras la pantalla está abierta el chat se marca como leído y el
     backend no manda push de ese grupo.
-  - `components/InfoGrupo.tsx` cierra con "Salir del grupo" (todos) y
+  - `components/InfoGrupo.tsx`: en "Botones", cada uno muestra de quién es
+    y su estado, con "Desvincular" para su dueño o el ADMIN, y abajo
+    "Vincular un botón" para capturar el código de la caja. Cierra con
+    "Salir del grupo" (todos) y
     "Eliminar grupo" (solo ADMIN, escribiendo el nombre para confirmar), y
     cada miembro tiene "Hacer admin" / "Quitar admin" para el ADMIN.
 - `Inicio.tsx` muestra un globito rojo con los mensajes sin leer de cada
@@ -328,6 +352,12 @@ Proyecto nuevo: React + TypeScript + Vite + Tailwind v4 + React Router.
   mantenerlo sí; menú "!" → tipos; Enter envía; info del grupo desde el
   encabezado; "Resuelta" quita la alerta de las fijas; y con el backend
   apagado el encabezado dice "Conectando…" y se recupera solo al volver.
+- Vinculación de botones: cuarta prueba end-to-end (29 chequeos) que da de
+  alta un botón con el script real y recorre todo: sin vincular no dispara
+  alertas pero sí se reporta, quién puede vincular y desvincular, que la
+  alerta diga de qué casa es, que no se filtren el secreto ni el código de
+  la caja, y que el mismo código sirva para volver a vincularlo en otro
+  grupo. También probado en el navegador.
 - Salir/eliminar grupo, nombrar admin y avisos de chat: tercera prueba
   end-to-end (31 chequeos). El push del chat se comprueba desde fuera con
   tokens falsos: FCM los rechaza y el backend los borra, así que el token
@@ -426,12 +456,10 @@ En orden sugerido:
      el primer `/panic` tardaría varios segundos. En emergencias hay que
      evitarlo (plan que no duerma, o que el heartbeat de los botones lo
      mantenga despierto).
-2. **Vincular botones desde la app** — hoy solo se dan de alta con
-   `scripts/createDevice.js`. Propuesta: un **código de vinculación impreso
-   en la caja**, de un solo uso, que el dueño captura desde la app; el
-   botón queda ligado a esa persona y con el nombre que le ponga. Es lo que
-   también destraba los grupos de comunidad (punto 9) y el "desvincular
-   botón" que hoy impide eliminar un grupo con botones.
+2. ~~Vincular botones desde la app~~ ✅ (ver arriba: código de la caja).
+   Falta lo que se decida para **grupos de comunidad** (punto 8) y poder
+   **rotar el código de la caja** si se filtra (hoy solo se puede cambiar
+   a mano en la base).
 3. **Firmware real del ESP32** — que llame a `/api/devices/heartbeat`,
    `/panic` y `/status` con sus credenciales (necesita el backend
    publicado, punto 1).

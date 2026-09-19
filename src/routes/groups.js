@@ -6,6 +6,7 @@ import { userAuth } from "../middleware/userAuth.js";
 import { buscarMembresia, estadoEfectivo } from "../membership.js";
 import { emitirAGrupo } from "../realtime.js";
 import { enviarPushDeMensaje } from "../push.js";
+import { normalizarClaimCode } from "../claimCode.js";
 
 const router = Router();
 
@@ -132,7 +133,10 @@ router.get("/:id", userAuth, async (req, res) => {
         include: { user: { select: { email: true, displayName: true } } },
         orderBy: { joinedAt: "asc" },
       },
-      devices: { orderBy: { createdAt: "asc" } },
+      devices: {
+        orderBy: { createdAt: "asc" },
+        include: { owner: { select: { id: true, displayName: true, email: true } } },
+      },
     },
   });
 
@@ -163,6 +167,10 @@ router.get("/:id", userAuth, async (req, res) => {
       batteryLevel: d.batteryLevel,
       firmwareVersion: d.firmwareVersion,
       lastSeenAt: d.lastSeenAt,
+      // Quién lo vinculó: en un coto, de qué casa es el botón.
+      owner: d.owner ? { userId: d.owner.id, nombre: d.owner.displayName || d.owner.email } : null,
+      // Su dueño y el administrador del grupo pueden desvincularlo.
+      puedoDesvincular: membresia.role === "ADMIN" || d.ownerId === req.user.id,
     })),
   });
 });
@@ -386,7 +394,7 @@ router.delete("/:id", userAuth, async (req, res) => {
   // roadmap), así que por ahora se bloquea.
   if (grupo._count.devices > 0) {
     return res.status(409).json({
-      error: "El grupo tiene botones vinculados. Escríbenos desde Ayuda para desvincularlos antes de eliminarlo.",
+      error: "El grupo tiene botones vinculados. Desvincúlalos primero desde la información del grupo.",
     });
   }
 
@@ -446,6 +454,110 @@ router.patch("/:id/members/:userId", userAuth, async (req, res) => {
 
   emitirAGrupo(req.params.id, "grupo:actualizado", { groupId: req.params.id });
   res.json({ ok: true, role });
+});
+
+// --- Botones del grupo ------------------------------------------------------
+
+// Vincular el botón con el código impreso en su caja. Lo puede hacer
+// cualquier miembro (en un coto, cada vecino vincula el suyo) y queda como su
+// dueño. El código no se consume: lo que marca que está en uso es claimedAt,
+// para que el papel de la caja siga sirviendo si algún día se desvincula.
+router.post("/:id/devices/claim", userAuth, async (req, res) => {
+  const membresia = await buscarMembresia(req.user.id, req.params.id);
+  if (!membresia) {
+    return res.status(404).json({ error: "Grupo no encontrado" });
+  }
+
+  const claimCode = normalizarClaimCode(req.body?.claimCode);
+  if (!claimCode) {
+    return res.status(400).json({ error: "El código de vinculación no es válido" });
+  }
+
+  const { name } = req.body ?? {};
+  if (name !== undefined && (!esTexto(name) || name.trim().length > 60)) {
+    return res.status(400).json({ error: "El nombre del botón puede tener máximo 60 caracteres" });
+  }
+
+  const device = await prisma.device.findUnique({ where: { claimCode } });
+  // Mismo mensaje exista o no: quien no tiene la caja no debería poder
+  // averiguar si un código es real.
+  if (!device) {
+    return res.status(404).json({ error: "No encontramos ese código. Revísalo tal como viene en la caja." });
+  }
+  if (device.claimedAt) {
+    return res.status(409).json({
+      error: "Ese botón ya está vinculado. Si es tuyo, desvincúlalo primero desde el grupo donde está.",
+    });
+  }
+
+  // updateMany con claimedAt null en el where: si dos personas capturan el
+  // mismo código al mismo tiempo, solo una lo vincula.
+  const { count } = await prisma.device.updateMany({
+    where: { id: device.id, claimedAt: null },
+    data: {
+      groupId: req.params.id,
+      ownerId: req.user.id,
+      claimedAt: new Date(),
+      name: esTexto(name) ? name.trim() : device.name,
+      status: "OFFLINE",
+    },
+  });
+  if (count === 0) {
+    return res.status(409).json({ error: "Ese botón acaba de ser vinculado por alguien más" });
+  }
+
+  await prisma.auditLog.create({
+    data: {
+      userId: req.user.id,
+      action: "DEVICE_CLAIMED",
+      entity: "Device",
+      entityId: device.id,
+      metadata: { groupId: req.params.id, deviceCode: device.deviceCode },
+    },
+  });
+
+  emitirAGrupo(req.params.id, "grupo:actualizado", { groupId: req.params.id });
+  res.status(201).json({ id: device.id, deviceCode: device.deviceCode, name: esTexto(name) ? name.trim() : device.name });
+});
+
+// Desvincular: lo puede hacer su dueño o el ADMIN del grupo. El botón vuelve
+// a quedar libre para vincularse con el mismo código de su caja, y deja de
+// pertenecer al grupo (por eso hay que hacerlo antes de eliminarlo).
+router.delete("/:id/devices/:deviceId", userAuth, async (req, res) => {
+  const membresia = await buscarMembresia(req.user.id, req.params.id);
+  if (!membresia) {
+    return res.status(404).json({ error: "Grupo no encontrado" });
+  }
+
+  const device = await prisma.device.findFirst({
+    where: { id: req.params.deviceId, groupId: req.params.id },
+  });
+  if (!device) {
+    return res.status(404).json({ error: "Ese botón no es de este grupo" });
+  }
+
+  if (membresia.role !== "ADMIN" && device.ownerId !== req.user.id) {
+    return res.status(403).json({ error: "Solo su dueño o el administrador del grupo pueden desvincularlo" });
+  }
+
+  await prisma.$transaction([
+    prisma.device.update({
+      where: { id: device.id },
+      data: { groupId: null, ownerId: null, claimedAt: null, status: "OFFLINE" },
+    }),
+    prisma.auditLog.create({
+      data: {
+        userId: req.user.id,
+        action: "DEVICE_UNLINKED",
+        entity: "Device",
+        entityId: device.id,
+        metadata: { groupId: req.params.id, deviceCode: device.deviceCode },
+      },
+    }),
+  ]);
+
+  emitirAGrupo(req.params.id, "grupo:actualizado", { groupId: req.params.id });
+  res.json({ ok: true });
 });
 
 export default router;
