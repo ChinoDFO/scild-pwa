@@ -230,6 +230,16 @@ faltan el ESP32 físico real y tener todo publicado con HTTPS (ver roadmap).
     campo `Bytes` se lee como `Uint8Array`, y `res.send()` de Express solo
     trata como binario a un Buffer — con cualquier otro objeto serializaría
     la imagen a JSON.
+  - **Las capturas se sueltan solas a los 3 meses** (`src/limpieza.js`): un
+    comprobante trae nombre, banco y monto de una persona, y una vez cerrado
+    el trámite no hay razón para seguirlo guardando. Se borra la imagen pero
+    **se conserva la solicitud**, así que el historial de quién pidió qué y
+    en qué acabó sigue completo, y queda un `AuditLog` de cada barrido. Una
+    solicitud todavía abierta conserva su captura aunque tenga meses: le
+    falta que alguien la revise. Corre como temporizador dentro del proceso
+    (diario, arranca a los 5 min de encender) y no como cron del sistema:
+    nada que configurar al desplegar, y es idempotente, así que no importa
+    si lo corren varias instancias. A mano: `npm run comprobantes:limpiar`.
   - Requiere los `PAGO_*` del `.env` (banco, CLABE, titular, monto).
   - `POST /api/admin/solicitudes/:id/aprobar` es lo **único** que sube
     `Device.extraAccesses` (con `updateMany` sobre el estado esperado: dos
