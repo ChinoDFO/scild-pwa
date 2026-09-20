@@ -254,9 +254,19 @@ model PaymentRequest {
   userId       String
   deviceId     String
   status       PaymentStatus @default(ABIERTA)
-  // Ruta del comprobante en Firebase Storage. Nunca se manda la imagen en
-  // sí: los administradores la ven con un enlace firmado que caduca.
-  proofPath    String?
+  // La captura del pago, guardada aquí mismo. Se eligió la base y no un
+  // servicio de archivos porque el proyecto ya tiene Postgres y no hay que
+  // pagar ni configurar nada más: un comprobante de celular pesa unos cientos
+  // de kilobytes y son unos pocos por cliente.
+  //
+  // OJO: no la selecciones en las consultas de lista. Solo la lee la ruta que
+  // se la sirve al administrador; traerla de más carga megabytes a memoria sin
+  // que nadie los use.
+  proofImage   Bytes?
+  // El tipo de la imagen (image/jpeg, image/png...). Sirve para servirla con
+  // la cabecera correcta y, de paso, para saber si ya hay comprobante sin
+  // tener que leer los bytes.
+  proofType    String?
   proofAt      DateTime?
   reviewedById String?
   reviewedAt   DateTime?

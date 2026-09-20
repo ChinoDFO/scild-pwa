@@ -2,7 +2,7 @@ import { Router } from "express";
 import prisma from "../prisma.js";
 import { userAuth } from "../middleware/userAuth.js";
 import { ACCESOS_POR_COMPRA } from "../acceso.js";
-import { enlaceDeComprobante } from "../comprobantes.js";
+import { leerComprobante } from "../comprobantes.js";
 
 const router = Router();
 
@@ -27,7 +27,9 @@ const nombreDe = (u) => u?.displayName || u?.email || "—";
 const SELECCION_SOLICITUD = {
   id: true,
   status: true,
-  proofPath: true,
+  // proofType y no proofImage: dice si ya hay captura sin traerse los bytes.
+  // La imagen se pide aparte, en /solicitudes/:id/comprobante.
+  proofType: true,
   proofAt: true,
   note: true,
   createdAt: true,
@@ -50,7 +52,7 @@ const SELECCION_SOLICITUD = {
   },
 };
 
-async function formatoSolicitud(s, { conEnlace }) {
+function formatoSolicitud(s) {
   return {
     id: s.id,
     status: s.status,
@@ -73,10 +75,8 @@ async function formatoSolicitud(s, { conEnlace }) {
       accesosComprados: s.device.extraAccesses,
       accesosRepartidos: s.device._count.grants,
     },
-    // Enlace firmado que caduca: el comprobante trae datos bancarios de una
-    // persona y el bucket no es público.
-    comprobante: conEnlace ? await enlaceDeComprobante(s.proofPath) : null,
-    hayComprobante: Boolean(s.proofPath),
+    // La imagen no viaja en el JSON: el panel la pide aparte, con su sesión.
+    hayComprobante: Boolean(s.proofType),
     messages: s.messages,
   };
 }
@@ -103,13 +103,7 @@ router.get("/solicitudes", async (req, res) => {
     take: 50,
   });
 
-  // El enlace del comprobante solo se firma para las que están por revisar:
-  // firmar cincuenta enlaces de solicitudes ya cerradas es trabajo tirado.
-  res.json(
-    await Promise.all(
-      solicitudes.map((s) => formatoSolicitud(s, { conEnlace: s.status === "EN_REVISION" }))
-    )
-  );
+  res.json(solicitudes.map(formatoSolicitud));
 });
 
 router.get("/solicitudes/:id", async (req, res) => {
@@ -120,7 +114,24 @@ router.get("/solicitudes/:id", async (req, res) => {
   if (!solicitud) {
     return res.status(404).json({ error: "Solicitud no encontrada" });
   }
-  res.json(await formatoSolicitud(solicitud, { conEnlace: true }));
+  res.json(formatoSolicitud(solicitud));
+});
+
+// La captura del pago. Va por su propia ruta, y no dentro del JSON de la
+// lista, por dos razones: son cientos de kilobytes que no tienen por qué
+// viajar en cada consulta, y así la imagen solo sale con una sesión de
+// administrador — un comprobante trae nombre, banco y monto de una persona,
+// no puede quedar en una URL que cualquiera abra.
+router.get("/solicitudes/:id/comprobante", async (req, res) => {
+  const comprobante = await leerComprobante(req.params.id);
+  if (!comprobante) {
+    return res.status(404).json({ error: "Esa solicitud no tiene comprobante" });
+  }
+
+  res.set("Content-Type", comprobante.contentType);
+  // Que no se quede en caché de nadie más que de quien la está viendo.
+  res.set("Cache-Control", "private, no-store");
+  res.send(comprobante.contenido);
 });
 
 // Confirma el depósito: le suma al botón sus accesos y cierra el trámite.

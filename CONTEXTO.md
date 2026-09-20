@@ -211,13 +211,26 @@ faltan el ESP32 físico real y tener todo publicado con HTTPS (ver roadmap).
     respuesta automática. Soporte sí escribe libre. Así el hilo es
     predecible, no hay nada que moderar y nadie acaba escribiendo datos de
     su tarjeta donde no van.
-  - Las **capturas viven en Firebase Storage**, no en Postgres ni en el
-    disco del servidor (efímero en casi cualquier host). La PWA manda la
-    imagen cruda (`express.raw`, sin multipart ni dependencia nueva), el
-    backend la sube con la cuenta de servicio y el administrador la ve con
-    un **enlace firmado que caduca a los 15 min**: un comprobante trae
-    nombre, banco y monto de una persona, no puede quedar adivinable.
-    Requiere `FIREBASE_STORAGE_BUCKET` y los `PAGO_*` del `.env`.
+  - Las **capturas viven en la propia base** (`PaymentRequest.proofImage`,
+    `Bytes`). Se intentó Firebase Storage primero, pero habilitarlo obliga a
+    mover el proyecto de Firebase al plan de pago por uso; el proyecto ya
+    tiene Postgres y un comprobante de celular pesa unos cientos de
+    kilobytes, así que no hay nada que optimizar todavía. Si algún día son
+    miles, se cambia por un bucket sin tocar el resto: la imagen entra y
+    sale solo por `src/comprobantes.js`.
+  - La PWA manda la imagen **cruda** (`express.raw`, sin multipart ni
+    dependencia nueva). La imagen **nunca** viaja en el JSON de las listas:
+    esas consultas seleccionan `proofType`, que basta para saber si ya hay
+    captura. El panel la pide aparte a
+    `GET /api/admin/solicitudes/:id/comprobante`, con su sesión, y la pinta
+    como blob — un `<img src>` directo no serviría porque el navegador no
+    manda la cabecera `Authorization` al cargar una imagen, y un comprobante
+    trae nombre, banco y monto de una persona.
+  - `leerComprobante` devuelve un **Buffer** a propósito: desde Prisma 6 un
+    campo `Bytes` se lee como `Uint8Array`, y `res.send()` de Express solo
+    trata como binario a un Buffer — con cualquier otro objeto serializaría
+    la imagen a JSON.
+  - Requiere los `PAGO_*` del `.env` (banco, CLABE, titular, monto).
   - `POST /api/admin/solicitudes/:id/aprobar` es lo **único** que sube
     `Device.extraAccesses` (con `updateMany` sobre el estado esperado: dos
     administradores aprobando a la vez suman una sola vez). Hay también

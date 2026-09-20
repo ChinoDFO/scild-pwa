@@ -108,7 +108,9 @@ router.post("/", userAuth, async (req, res) => {
 async function miSolicitud(req, res) {
   const solicitud = await prisma.paymentRequest.findFirst({
     where: { id: req.params.id, userId: req.user.id },
-    select: { ...SELECCION, proofPath: true },
+    // proofType y no proofImage: basta para saber si ya mandó captura, sin
+    // cargarse la imagen entera a memoria.
+    select: { ...SELECCION, proofType: true },
   });
   if (!solicitud) {
     res.status(404).json({ error: "Solicitud no encontrada" });
@@ -190,7 +192,7 @@ router.post(
     // Una por solicitud. Si la rechazan, el cliente abre otra y manda una
     // nueva: así un error de foto no deja a alguien que ya pagó sin poder
     // comprobarlo.
-    if (solicitud.proofPath) {
+    if (solicitud.proofType) {
       return res.status(409).json({
         error: "Ya mandaste una captura para esta solicitud. Espera a que la revisemos.",
       });
@@ -204,26 +206,21 @@ router.post(
       return res.status(400).json({ error: "La captura llegó vacía" });
     }
 
-    const ruta = await guardarComprobante({
+    // Guarda la imagen y deja la solicitud EN_REVISION.
+    await guardarComprobante({
       requestId: solicitud.id,
       contenido: req.body,
       contentType,
     });
 
-    await prisma.$transaction([
-      prisma.paymentRequest.update({
-        where: { id: solicitud.id },
-        data: { proofPath: ruta, proofAt: new Date(), status: "EN_REVISION" },
-      }),
-      prisma.paymentMessage.create({
-        data: {
-          requestId: solicitud.id,
-          from: "SOPORTE",
-          kind: "AUTOMATICO",
-          body: "Recibimos tu captura. En cuanto confirmemos el depósito se activan tus accesos.",
-        },
-      }),
-    ]);
+    await prisma.paymentMessage.create({
+      data: {
+        requestId: solicitud.id,
+        from: "SOPORTE",
+        kind: "AUTOMATICO",
+        body: "Recibimos tu captura. En cuanto confirmemos el depósito se activan tus accesos.",
+      },
+    });
 
     const actualizada = await prisma.paymentRequest.findUnique({
       where: { id: solicitud.id },
