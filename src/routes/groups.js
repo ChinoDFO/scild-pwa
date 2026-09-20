@@ -4,9 +4,10 @@ import { Prisma } from "@prisma/client";
 import prisma from "../prisma.js";
 import { userAuth } from "../middleware/userAuth.js";
 import { buscarMembresia, estadoEfectivo } from "../membership.js";
+import { accesoDeCuenta, cuentasCompletas, volverseTitular, ErrorDeAcceso } from "../acceso.js";
+import { apartarLugar, cuposDelGrupo, respaldarMiembrosSueltos } from "../cupos.js";
 import { emitirAGrupo } from "../realtime.js";
 import { enviarPushDeMensaje } from "../push.js";
-import { normalizarClaimCode } from "../claimCode.js";
 
 const router = Router();
 
@@ -79,6 +80,8 @@ router.post("/", userAuth, async (req, res) => {
       ...data,
       inviteCode: generateInviteCode(),
       members: {
+        // Sin botón todavía: su lugar queda sin respaldo hasta que vincule
+        // uno (ver respaldarMiembrosSueltos en src/cupos.js).
         create: { userId: req.user.id, role: "ADMIN" },
       },
     },
@@ -105,8 +108,19 @@ router.post("/join", userAuth, async (req, res) => {
   }
 
   try {
-    const membership = await prisma.groupMember.create({
-      data: { userId: req.user.id, groupId: group.id, role: "MEMBER" },
+    // Cada botón del grupo da cupo para diez personas. Si no hay lugar, la
+    // forma de crecer es que entre alguien más con su propio botón.
+    const membership = await prisma.$transaction(async (tx) => {
+      const seatDeviceId = await apartarLugar(tx, group.id);
+      if (!seatDeviceId) {
+        throw new ErrorDeAcceso(
+          409,
+          "Este grupo ya no tiene lugares libres. Para meter a más personas, alguien más con botón tiene que unirse al grupo."
+        );
+      }
+      return tx.groupMember.create({
+        data: { userId: req.user.id, groupId: group.id, role: "MEMBER", seatDeviceId },
+      });
     });
     emitirAGrupo(group.id, "grupo:actualizado", { groupId: group.id });
     res.status(201).json({ groupId: group.id, groupName: group.name, role: membership.role });
@@ -142,6 +156,25 @@ router.get("/:id", userAuth, async (req, res) => {
 
   const ahora = Date.now();
 
+  // Quién de los que están en el grupo tiene las funciones completas, y el
+  // estado del cupo. Las dos cosas se resuelven en bloque, no por miembro.
+  const [completas, cupos, titularidades] = await Promise.all([
+    cuentasCompletas(group.members.map((m) => m.userId)),
+    cuposDelGrupo(group.id),
+    prisma.deviceHolder.findMany({
+      where: { deviceId: { in: group.devices.map((d) => d.id) } },
+      select: { deviceId: true, userId: true, user: { select: { displayName: true, email: true } } },
+      orderBy: { createdAt: "asc" },
+    }),
+  ]);
+
+  const titularesDe = new Map();
+  for (const t of titularidades) {
+    const lista = titularesDe.get(t.deviceId) ?? [];
+    lista.push({ userId: t.userId, nombre: t.user.displayName || t.user.email });
+    titularesDe.set(t.deviceId, lista);
+  }
+
   res.json({
     id: group.id,
     name: group.name,
@@ -151,12 +184,21 @@ router.get("/:id", userAuth, async (req, res) => {
     role: membresia.role,
     // Para que la PWA distinga sus propios mensajes en el chat.
     myUserId: req.user.id,
+    // Si esta persona puede disparar alertas. Es propiedad de su cuenta, no
+    // de este grupo: la PWA esconde el botón SOS y el menú de tipos si no.
+    puedoAlertar: completas.has(req.user.id),
+    // Cupo del establecimiento: diez lugares por cada botón vinculado.
+    cupos,
     inviteCode: membresia.role === "ADMIN" ? group.inviteCode : null,
     members: group.members.map((m) => ({
       userId: m.userId,
       email: m.user.email,
       displayName: m.user.displayName,
       role: m.role,
+      // Titular de un botón o con un acceso regalado; si no, es invitado.
+      accesoCompleto: completas.has(m.userId),
+      // De qué botón sale su lugar en el grupo.
+      seatDeviceId: m.seatDeviceId,
     })),
     // Nunca se manda secretHash al cliente.
     devices: group.devices.map((d) => ({
@@ -169,6 +211,8 @@ router.get("/:id", userAuth, async (req, res) => {
       lastSeenAt: d.lastSeenAt,
       // Quién lo vinculó: en un coto, de qué casa es el botón.
       owner: d.owner ? { userId: d.owner.id, nombre: d.owner.displayName || d.owner.email } : null,
+      // Las dos personas que comparten el botón (el código vale dos veces).
+      titulares: titularesDe.get(d.id) ?? [],
       // Su dueño y el administrador del grupo pueden desvincularlo.
       puedoDesvincular: membresia.role === "ADMIN" || d.ownerId === req.user.id,
     })),
@@ -418,6 +462,10 @@ router.delete("/:id", userAuth, async (req, res) => {
 
 // El ADMIN nombra administrador a otro miembro (o le quita el cargo). Es lo
 // que permite que un administrador pueda salirse del grupo.
+//
+// El cargo de ADMIN no tiene nada que ver con poder alertar: eso es de la
+// cuenta (ver src/acceso.js) y lo reparte el titular del botón desde el
+// apartado de Códigos, no el administrador del grupo.
 router.patch("/:id/members/:userId", userAuth, async (req, res) => {
   if (!(await exigirAdmin(req, res))) return;
 
@@ -458,66 +506,85 @@ router.patch("/:id/members/:userId", userAuth, async (req, res) => {
 
 // --- Botones del grupo ------------------------------------------------------
 
-// Vincular el botón con el código impreso en su caja. Lo puede hacer
-// cualquier miembro (en un coto, cada vecino vincula el suyo) y queda como su
-// dueño. El código no se consume: lo que marca que está en uso es claimedAt,
-// para que el papel de la caja siga sirviendo si algún día se desvincula.
+// Vincula un botón a este grupo: es lo que hace que el botón le avise a esta
+// gente y lo que le suma al grupo sus diez lugares.
+//
+// Acepta dos caminos, porque son dos momentos distintos:
+//   - claimCode: el código impreso en la caja. Además de vincular el botón al
+//     grupo, deja a quien lo captura como titular (el código vale para dos
+//     personas). Es el camino desde la info del grupo, para quien compró el
+//     botón y lo está estrenando.
+//   - deviceId: un botón del que ya eres titular, p. ej. porque capturaste el
+//     código al crear tu cuenta. Solo lo trae a este grupo.
 router.post("/:id/devices/claim", userAuth, async (req, res) => {
   const membresia = await buscarMembresia(req.user.id, req.params.id);
   if (!membresia) {
     return res.status(404).json({ error: "Grupo no encontrado" });
   }
 
-  const claimCode = normalizarClaimCode(req.body?.claimCode);
-  if (!claimCode) {
-    return res.status(400).json({ error: "El código de vinculación no es válido" });
-  }
-
-  const { name } = req.body ?? {};
+  const { name, claimCode, deviceId } = req.body ?? {};
   if (name !== undefined && (!esTexto(name) || name.trim().length > 60)) {
     return res.status(400).json({ error: "El nombre del botón puede tener máximo 60 caracteres" });
   }
 
-  const device = await prisma.device.findUnique({ where: { claimCode } });
-  // Mismo mensaje exista o no: quien no tiene la caja no debería poder
-  // averiguar si un código es real.
-  if (!device) {
-    return res.status(404).json({ error: "No encontramos ese código. Revísalo tal como viene en la caja." });
+  let device;
+  if (esTexto(claimCode)) {
+    // Lanza ErrorDeAcceso si el código no sirve o ya se usó dos veces.
+    ({ device } = await volverseTitular({ userId: req.user.id, claimCode }));
+  } else if (esTexto(deviceId)) {
+    device = await prisma.device.findUnique({ where: { id: deviceId } });
+    if (!device) {
+      return res.status(404).json({ error: "Ese botón no existe" });
+    }
+  } else {
+    return res.status(400).json({ error: "Falta el código de la caja del botón" });
   }
-  if (device.claimedAt) {
+
+  // Vincular un botón a un grupo es decidir a quién le avisa: solo quien lo
+  // compró. Con claimCode esto siempre pasa (acaba de volverse titular); con
+  // deviceId es lo que impide traerse el botón de alguien más.
+  const esTitular = await prisma.deviceHolder.findUnique({
+    where: { deviceId_userId: { deviceId: device.id, userId: req.user.id } },
+  });
+  if (!esTitular) {
+    return res.status(403).json({ error: "Solo los titulares de ese botón pueden vincularlo a un grupo" });
+  }
+
+  if (device.groupId === req.params.id) {
+    return res.status(409).json({ error: "Ese botón ya está en este grupo" });
+  }
+  if (device.groupId) {
     return res.status(409).json({
-      error: "Ese botón ya está vinculado. Si es tuyo, desvincúlalo primero desde el grupo donde está.",
+      error: "Ese botón está vinculado a otro grupo. Desvincúlalo de allá para traerlo aquí.",
     });
   }
 
-  // updateMany con claimedAt null en el where: si dos personas capturan el
-  // mismo código al mismo tiempo, solo una lo vincula.
-  const { count } = await prisma.device.updateMany({
-    where: { id: device.id, claimedAt: null },
-    data: {
-      groupId: req.params.id,
-      ownerId: req.user.id,
-      claimedAt: new Date(),
-      name: esTexto(name) ? name.trim() : device.name,
-      status: "OFFLINE",
-    },
-  });
-  if (count === 0) {
-    return res.status(409).json({ error: "Ese botón acaba de ser vinculado por alguien más" });
-  }
+  const nombre = esTexto(name) ? name.trim() : device.name;
 
-  await prisma.auditLog.create({
-    data: {
-      userId: req.user.id,
-      action: "DEVICE_CLAIMED",
-      entity: "Device",
-      entityId: device.id,
-      metadata: { groupId: req.params.id, deviceCode: device.deviceCode },
-    },
+  await prisma.$transaction(async (tx) => {
+    await tx.device.update({
+      where: { id: device.id },
+      data: { groupId: req.params.id, name: nombre, status: "OFFLINE" },
+    });
+
+    // Sus diez lugares recogen a quien estaba sin respaldo: quien creó el
+    // grupo antes de tener botón, y los que quedaron sueltos si otro botón
+    // se desvinculó.
+    await respaldarMiembrosSueltos(tx, req.params.id, device.id);
+
+    await tx.auditLog.create({
+      data: {
+        userId: req.user.id,
+        action: "DEVICE_CLAIMED",
+        entity: "Device",
+        entityId: device.id,
+        metadata: { groupId: req.params.id, deviceCode: device.deviceCode },
+      },
+    });
   });
 
   emitirAGrupo(req.params.id, "grupo:actualizado", { groupId: req.params.id });
-  res.status(201).json({ id: device.id, deviceCode: device.deviceCode, name: esTexto(name) ? name.trim() : device.name });
+  res.status(201).json({ id: device.id, deviceCode: device.deviceCode, name: nombre });
 });
 
 // Desvincular: lo puede hacer su dueño o el ADMIN del grupo. El botón vuelve
@@ -541,9 +608,17 @@ router.delete("/:id/devices/:deviceId", userAuth, async (req, res) => {
   }
 
   await prisma.$transaction([
+    // Sale del grupo, pero NO deja de ser suyo: sus titulares siguen siendo
+    // titulares (el acceso completo es de la cuenta) y el botón se puede
+    // volver a vincular a otro grupo. Lo que sí se pierde son sus diez
+    // lugares: quien los ocupaba se queda en el grupo, pero sin respaldo.
     prisma.device.update({
       where: { id: device.id },
-      data: { groupId: null, ownerId: null, claimedAt: null, status: "OFFLINE" },
+      data: { groupId: null, status: "OFFLINE" },
+    }),
+    prisma.groupMember.updateMany({
+      where: { groupId: req.params.id, seatDeviceId: device.id },
+      data: { seatDeviceId: null },
     }),
     prisma.auditLog.create({
       data: {

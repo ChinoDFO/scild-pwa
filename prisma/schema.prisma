@@ -44,6 +44,21 @@ enum DeviceEventType {
   DISCONNECTED
 }
 
+// Solicitud de ampliación de límite: el cliente paga por transferencia y un
+// administrador de la plataforma la confirma a mano.
+enum PaymentStatus {
+  ABIERTA // esperando que pague y mande su comprobante
+  EN_REVISION // ya mandó la captura, falta que la revisemos
+  APROBADA
+  RECHAZADA
+  CANCELADA // el propio cliente la dio de baja
+}
+
+enum PaymentAuthor {
+  CLIENTE
+  SOPORTE
+}
+
 enum NotificationStatus {
   PENDING
   SENT
@@ -54,21 +69,33 @@ enum NotificationStatus {
 // La identidad y la contraseña viven en Firebase Auth. Este modelo solo
 // guarda el perfil y enlaza con Firebase mediante firebaseUid.
 model User {
-  id          String   @id @default(uuid())
-  firebaseUid String   @unique
-  email       String   @unique
-  displayName String?
-  phone       String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id              String   @id @default(uuid())
+  firebaseUid     String   @unique
+  email           String   @unique
+  displayName     String?
+  phone           String?
+  // Administrador de la plataforma (nosotros), no de un grupo. Es quien ve
+  // la lista de solicitudes de pago y confirma los depósitos. Se prende a
+  // mano en la base: no hay forma de dárselo a sí mismo desde la app.
+  isPlatformAdmin Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
-  memberships       GroupMember[]
-  devices           Device[]       @relation("DeviceOwner")
-  messages          Message[]
-  alertsCreated     Alert[]        @relation("AlertCreatedBy")
-  notifications     Notification[]
-  pushTokens        PushToken[]
-  auditLogs         AuditLog[]
+  memberships      GroupMember[]
+  devices          Device[]         @relation("DeviceOwner")
+  // Botones de los que es titular (el código de la caja se valida 2 veces).
+  titularidades    DeviceHolder[]
+  // Acceso completo que le regaló un titular, y los que él ha regalado.
+  accesoRecibido   AccessGrant[]    @relation("AccesoRecibido")
+  accesosOtorgados AccessGrant[]    @relation("AccesoOtorgado")
+  messages         Message[]
+  alertsCreated    Alert[]          @relation("AlertCreatedBy")
+  notifications    Notification[]
+  pushTokens       PushToken[]
+  auditLogs        AuditLog[]
+  solicitudes      PaymentRequest[] @relation("SolicitanteDelPago")
+  pagosRevisados   PaymentRequest[] @relation("RevisorDelPago")
+  mensajesDePago   PaymentMessage[]
 
   @@index([email])
 }
@@ -90,21 +117,30 @@ model Group {
 }
 
 model GroupMember {
-  id       String   @id @default(uuid())
-  userId   String
-  groupId  String
-  role     Role     @default(MEMBER)
-  joinedAt DateTime @default(now())
+  id           String   @id @default(uuid())
+  userId       String
+  groupId      String
+  role         Role     @default(MEMBER)
+  joinedAt     DateTime @default(now())
   // Hasta dónde leyó el chat de este grupo. Con esto se sabe cuántos
   // mensajes trae sin leer y si el aviso push dice el mensaje o
   // "3 mensajes nuevos".
-  lastReadAt DateTime @default(now())
+  lastReadAt   DateTime @default(now())
+  // Cada botón vinculado a un grupo da cupo para 10 personas. Esto dice de
+  // qué botón sale el lugar que ocupa esta membresía, que es lo que permite
+  // contar cuántos le quedan a cada uno: cuando un botón agota sus 10, la
+  // única forma de meter más gente es que entre otro titular con su botón.
+  // Queda en null si el botón se desvincula: la persona no se va del grupo,
+  // pero su lugar deja de estar respaldado (ver src/cupos.js).
+  seatDeviceId String?
 
-  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
-  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user       User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  group      Group   @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  seatDevice Device? @relation("CupoDelBoton", fields: [seatDeviceId], references: [id], onDelete: SetNull)
 
   @@unique([userId, groupId])
   @@index([groupId])
+  @@index([seatDeviceId])
 }
 
 // El Device Secret nunca se guarda en texto plano: solo su hash.
@@ -132,6 +168,11 @@ model Device {
   batteryLevel      Int?
   lastSeenAt        DateTime?
   heartbeatInterval Int          @default(60)
+  // Accesos completos comprados. De fábrica un botón solo da funciones
+  // completas a sus 2 titulares; cada compra suma 5 lugares que el titular
+  // puede repartir entre los invitados de su grupo (ver AccessGrant). Lo
+  // mueve un administrador de la plataforma al confirmar el pago.
+  extraAccesses     Int          @default(0)
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
 
@@ -140,11 +181,119 @@ model Device {
   // inservible el aparato (su secreto no se puede recuperar).
   group          Group?                @relation(fields: [groupId], references: [id], onDelete: SetNull)
   owner          User?                 @relation("DeviceOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  holders        DeviceHolder[]
+  grants         AccessGrant[]
+  solicitudes    PaymentRequest[]
+  // Las membresías que ocupan uno de los 10 lugares de este botón.
+  seats          GroupMember[]         @relation("CupoDelBoton")
   alerts         Alert[]
   events         DeviceEvent[]
   configurations DeviceConfiguration[]
 
   @@index([groupId])
+}
+
+// Titular de un botón: quien validó el código impreso en su caja. Son como
+// máximo DOS por botón, a propósito. La idea del producto: un botón sirve
+// para la casa, no para una persona, así que lo comparten los dos que viven
+// ahí, y ambos tienen las funciones completas de la app. El resto de la
+// familia (que vive en otro lado) entra como invitado: se entera, pero no
+// dispara alarmas del coto ajeno.
+//
+// El tope de 2 se aplica en src/acceso.js, no en la base: la restricción
+// "máximo N filas por deviceId" no existe en SQL sin un trigger, y la
+// transacción que vincula ya cuenta antes de insertar.
+model DeviceHolder {
+  id        String   @id @default(uuid())
+  deviceId  String
+  userId    String
+  createdAt DateTime @default(now())
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // La misma persona no ocupa los dos lugares del mismo botón.
+  @@unique([deviceId, userId])
+  @@index([userId])
+}
+
+// Acceso completo que un titular le da a alguien más, con los lugares que
+// compró (Device.extraAccesses). Es lo que convierte a un invitado en una
+// cuenta que puede disparar alertas.
+//
+// Va contra el botón y no contra el titular porque los dos titulares de un
+// botón comparten la misma casa y la misma compra.
+model AccessGrant {
+  id          String   @id @default(uuid())
+  deviceId    String
+  // Quién recibe el acceso completo.
+  userId      String
+  // Cuál de los dos titulares lo otorgó (para la bitácora).
+  grantedById String
+  createdAt   DateTime @default(now())
+
+  device    Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  user      User   @relation("AccesoRecibido", fields: [userId], references: [id], onDelete: Cascade)
+  grantedBy User   @relation("AccesoOtorgado", fields: [grantedById], references: [id], onDelete: Cascade)
+
+  @@unique([deviceId, userId])
+  @@index([userId])
+}
+
+// Una solicitud de ampliación de límite, de principio a fin: el cliente la
+// abre, se le muestran los datos bancarios, deposita, manda UNA captura y un
+// administrador la confirma. Al aprobarla se le suman ACCESOS_POR_COMPRA
+// lugares completos al botón (Device.extraAccesses).
+//
+// Es una fila por intento, no una por cliente: si una captura se rechaza
+// (borrosa, monto que no cuadra), el cliente abre otra solicitud y manda una
+// captura nueva. Con "una captura por cuenta" un error de foto dejaría a
+// alguien que ya pagó sin forma de comprobarlo.
+model PaymentRequest {
+  id           String        @id @default(uuid())
+  userId       String
+  deviceId     String
+  status       PaymentStatus @default(ABIERTA)
+  // Ruta del comprobante en Firebase Storage. Nunca se manda la imagen en
+  // sí: los administradores la ven con un enlace firmado que caduca.
+  proofPath    String?
+  proofAt      DateTime?
+  reviewedById String?
+  reviewedAt   DateTime?
+  // Por qué se rechazó, para que el cliente sepa qué corregir.
+  note         String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  user       User             @relation("SolicitanteDelPago", fields: [userId], references: [id], onDelete: Cascade)
+  device     Device           @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  reviewedBy User?            @relation("RevisorDelPago", fields: [reviewedById], references: [id], onDelete: SetNull)
+  messages   PaymentMessage[]
+
+  @@index([status, createdAt])
+  @@index([userId])
+}
+
+// El chat de la solicitud. El cliente NO escribe texto libre: manda mensajes
+// de un catálogo cerrado (src/pagos.js) y el backend resuelve el texto. Así
+// el hilo es predecible, no hay nada que moderar y el cliente no puede
+// escribir datos sensibles donde no van.
+model PaymentMessage {
+  id        String        @id @default(uuid())
+  requestId String
+  from      PaymentAuthor
+  // Id del mensaje del catálogo (YA_PAGUE, CUANTO_TARDA...) o TEXTO cuando
+  // lo escribe soporte.
+  kind      String
+  body      String
+  // Quién lo mandó. Null cuando es un mensaje automático de la plataforma.
+  userId    String?
+  createdAt DateTime      @default(now())
+
+  request PaymentRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  user    User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([requestId, createdAt])
 }
 
 // Bitácora cruda de todo lo que manda el dispositivo (heartbeat, panic,

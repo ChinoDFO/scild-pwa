@@ -2,6 +2,7 @@ import { Router } from "express";
 import prisma from "../prisma.js";
 import { userAuth } from "../middleware/userAuth.js";
 import { buscarMembresia } from "../membership.js";
+import { accesoDeCuenta } from "../acceso.js";
 import { crearNotificacionesPendientes, enviarPushDeAlerta } from "../push.js";
 import { emitirAGrupo } from "../realtime.js";
 import { TIPOS_ALERTA, esTipoValido, tipoDeAlerta } from "../tiposAlerta.js";
@@ -69,6 +70,17 @@ router.post("/", userAuth, async (req, res) => {
 
   if (!(await buscarMembresia(req.user.id, groupId))) {
     return res.status(404).json({ error: "Grupo no encontrado" });
+  }
+
+  // La comprobación de verdad va aquí, no en la PWA: esconder el botón SOS
+  // evita el error de dedo, pero cualquiera puede llamar a la API a mano.
+  // El permiso es de la cuenta: se tiene en todos los grupos o en ninguno.
+  const acceso = await accesoDeCuenta(req.user.id);
+  if (!acceso.completo) {
+    return res.status(403).json({
+      error:
+        "Tu cuenta no puede enviar alertas. Vincula el código de tu botón desde Códigos, o pídele a un titular que te dé uno de sus accesos.",
+    });
   }
 
   const alerta = await prisma.$transaction(async (tx) => {

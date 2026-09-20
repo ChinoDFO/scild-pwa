@@ -12,6 +12,87 @@ const CODIGOS_TOKEN_MUERTO = new Set([
   "messaging/invalid-argument",
 ]);
 
+// A dónde manda la notificación al tocarla. FRONTEND_ORIGIN puede traer
+// varios orígenes separados por coma; el primero es el de producción.
+const frontend = () => process.env.FRONTEND_ORIGIN?.split(",")[0] || "http://localhost:5173";
+
+// --- Insistencia de las alertas ---------------------------------------------
+// Una PWA no puede crear su propio canal de notificaciones en Android: el
+// sonido, la vibración y el "No molestar" los decide el canal que Chrome usa
+// para TODOS los sitios, y no hay manera de ponerle una sirena. Lo único que
+// sí está en nuestras manos es repetir el aviso, igual que el botón físico
+// cuando manda la alerta varias veces: con el mismo tag y renotify, cada
+// repetición vuelve a sonar y a vibrar en lugar de apilarse en silencio.
+//
+// Se corta en cuanto alguien toca "Ya voy" o "Resuelta": si el grupo ya
+// reaccionó, seguir insistiendo solo entrena a la gente a silenciar la app.
+const RONDAS_DE_ALERTA = 3;
+const ESPERA_ENTRE_RONDAS_MS = 4_000;
+const VIBRACION_ALERTA = [300, 150, 300, 150, 300];
+
+const esperar = (ms) => new Promise((seguir) => setTimeout(seguir, ms));
+
+// El mensaje que se manda a FCM, idéntico en todas las rondas.
+function mensajeDeAlerta(alerta, aviso, tokens) {
+  return {
+    tokens,
+    notification: aviso,
+    // Los valores de data tienen que ser strings; la PWA los usa para saber
+    // a qué alerta corresponde el aviso que le llegó.
+    data: {
+      kind: "alerta",
+      alertId: alerta.id,
+      groupId: alerta.groupId,
+      source: alerta.source,
+      createdAt: alerta.createdAt.toISOString(),
+    },
+    webpush: {
+      notification: {
+        // Un solo aviso visible por alerta: si llegan duplicados por varios
+        // canales, el tag hace que se reemplacen en vez de apilarse.
+        tag: `alerta-${alerta.id}`,
+        // Y con renotify ese reemplazo vuelve a sonar. Es lo que convierte
+        // las repeticiones en insistencia y no en un aviso mudo que cambia.
+        renotify: true,
+        // Una emergencia no se auto-descarta a los segundos.
+        requireInteraction: true,
+        // Android decide si la respeta (manda su canal), pero donde pega se
+        // siente distinta de un mensaje del chat.
+        vibrate: VIBRACION_ALERTA,
+        // PNG: Android no muestra SVG en notificaciones.
+        icon: "/pwa-192x192.png",
+        // Atender desde la notificación: abre la app ya con la alerta
+        // marcada como "voy en camino" (lo resuelve la pantalla del grupo).
+        actions: [{ action: "atender", title: "Ya voy" }],
+      },
+      // Al tocar el aviso se abre el grupo de la alerta, no la pantalla de
+      // inicio: en una emergencia nadie debería tener que buscar el grupo.
+      fcmOptions: { link: `${frontend()}/grupos/${alerta.groupId}` },
+      headers: { Urgency: "high" },
+    },
+  };
+}
+
+// Rondas 2 en adelante. Corre por su cuenta (nadie la espera) y revisa el
+// estado de la alerta antes de cada una.
+async function repetirAlerta(alerta, aviso, tokens) {
+  for (let ronda = 2; ronda <= RONDAS_DE_ALERTA; ronda++) {
+    await esperar(ESPERA_ENTRE_RONDAS_MS);
+
+    const actual = await prisma.alert.findUnique({
+      where: { id: alerta.id },
+      select: { status: true },
+    });
+    if (actual?.status !== "ACTIVE") return ronda - 1;
+
+    const respuesta = await firebaseMessaging.sendEachForMulticast(
+      mensajeDeAlerta(alerta, aviso, tokens)
+    );
+    await limpiarTokensMuertos(respuesta, tokens);
+  }
+  return RONDAS_DE_ALERTA;
+}
+
 // Al enviar, una alerta se ve así en la pantalla del celular. El título dice
 // QUÉ pasa (tipo) y el cuerpo quién/dónde, para entenderla sin abrir la app.
 function armarAviso(alerta) {
@@ -95,32 +176,9 @@ export async function enviarPushDeAlerta(alertId) {
 
   const aviso = armarAviso(alerta);
 
-  const respuesta = await firebaseMessaging.sendEachForMulticast({
-    tokens,
-    notification: aviso,
-    // Los valores de data tienen que ser strings; la PWA los usa para saber
-    // a qué alerta corresponde el aviso que le llegó.
-    data: {
-      alertId: alerta.id,
-      groupId: alerta.groupId,
-      source: alerta.source,
-      createdAt: alerta.createdAt.toISOString(),
-    },
-    webpush: {
-      notification: {
-        // Un solo aviso visible por alerta: si llegan duplicados por varios
-        // canales, el tag hace que se reemplacen en vez de apilarse.
-        tag: `alerta-${alerta.id}`,
-        // Una emergencia no se auto-descarta a los segundos.
-        requireInteraction: true,
-        // PNG: Android no muestra SVG en notificaciones.
-        icon: "/pwa-192x192.png",
-      },
-      // Al tocar el aviso se abre la PWA en vez de una pestaña en blanco.
-      fcmOptions: { link: process.env.FRONTEND_ORIGIN?.split(",")[0] || "http://localhost:5173" },
-      headers: { Urgency: "high" },
-    },
-  });
+  const respuesta = await firebaseMessaging.sendEachForMulticast(
+    mensajeDeAlerta(alerta, aviso, tokens)
+  );
 
   const idsEntregadas = new Set();
   const idsConFallo = new Set();
@@ -158,6 +216,15 @@ export async function enviarPushDeAlerta(alertId) {
     }),
     prisma.pushToken.deleteMany({ where: { token: { in: tokensMuertos } } }),
   ]);
+
+  // Las repeticiones van por su cuenta: quien llamó (el ESP32, la PWA) ya
+  // tiene su resumen y no se queda esperando a que terminen las tres rondas.
+  const vivos = tokens.filter((t) => !tokensMuertos.includes(t));
+  if (vivos.length > 0) {
+    repetirAlerta(alerta, aviso, vivos).catch((e) =>
+      console.error(`Fallaron las repeticiones de la alerta ${alertId}:`, e)
+    );
+  }
 
   return {
     tokens: tokens.length,
@@ -247,7 +314,10 @@ export async function enviarPushDeMensaje(mensaje) {
       data: { kind: "chat", groupId, messageId: mensaje.id },
       webpush: {
         notification: { tag: `chat-${groupId}`, icon: "/pwa-192x192.png" },
-        fcmOptions: { link: `${process.env.FRONTEND_ORIGIN?.split(",")[0] || "http://localhost:5173"}/grupos/${groupId}` },
+        fcmOptions: { link: `${frontend()}/grupos/${groupId}` },
+        // Normal y no high: lo urgente es la alerta. Marcar todo como
+        // urgente gasta batería y, peor, le quita significado a la palabra.
+        headers: { Urgency: "normal" },
       },
     });
     enviados += respuesta.successCount;

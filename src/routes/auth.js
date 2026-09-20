@@ -1,6 +1,7 @@
 import { Router } from "express";
 import prisma from "../prisma.js";
 import { userAuth } from "../middleware/userAuth.js";
+import { accesoDeCuenta } from "../acceso.js";
 
 const router = Router();
 
@@ -21,11 +22,19 @@ router.get("/me", userAuth, async (req, res) => {
     )
   );
 
+  // Si la cuenta puede alertar. La PWA esconde el botón SOS y el menú de
+  // tipos cuando es false, en todos sus grupos.
+  const acceso = await accesoDeCuenta(req.user.id);
+
   res.json({
     id: req.user.id,
     email: req.user.email,
     displayName: req.user.displayName,
     phone: req.user.phone,
+    accesoCompleto: acceso.completo,
+    esTitular: acceso.esTitular,
+    // Administrador de la plataforma: le aparece el panel de solicitudes.
+    esAdminPlataforma: req.user.isPlatformAdmin,
     groups: memberships.map((m, i) => ({
       id: m.group.id,
       name: m.group.name,

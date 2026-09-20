@@ -11,6 +11,9 @@ export function buscarMembresia(userId, groupId) {
   });
 }
 
+// Quién puede disparar alertas NO se decide aquí: es una propiedad de la
+// cuenta, no de la membresía. Ver accesoDeCuenta() en src/acceso.js.
+
 // OFFLINE e IRREGULAR no los reporta el ESP32 (no puede avisar que se
 // apagó): se deducen de cuánto tiempo lleva sin mandar heartbeat. Se calcula
 // al leer en vez de guardarse, para no necesitar un proceso que lo revise.

@@ -154,13 +154,78 @@ faltan el ESP32 físico real y tener todo publicado con HTTPS (ver roadmap).
     trae `tipo: { id, etiqueta, emoji }` ya resuelto.
   - `POST /api/alerts` `{ groupId, type }` — alerta manual (`source: APP`)
     del tipo elegido (`GENERAL` si no viene; 400 si no existe en el
-    catálogo). Avisa a todos los miembros menos a quien la generó. El push
+    catálogo; **403 si la cuenta no es completa**, ver "Acceso"). Avisa a todos los miembros menos a quien la generó. El push
     dice qué pasa: título "🚗 Carro sospechoso", cuerpo "Mamá reportó carro
     sospechoso en Casa Flores".
   - `POST /api/alerts/:id/atender` y `/resolver` — ACTIVE → ACKNOWLEDGED →
     RESOLVED, a prueba de doble clic simultáneo (409). Resolver la última
     alerta abierta de un botón lo saca de `EMERGENCY` (antes nada lo hacía:
     el heartbeat conserva ese estado). Quién hizo qué queda en `AuditLog`.
+- **Acceso de la cuenta (`src/acceso.js`) y cupos (`src/cupos.js`)** — el
+  sistema de discriminación entre quien tiene botón y quien no:
+  - Una cuenta es **completa** (puede disparar alertas) si es **titular**
+    de un botón o si un titular le regaló uno de los accesos que compró.
+    Cualquier otra es **invitada**: lee y escribe en el chat de sus grupos,
+    pero no dispara alertas de ningún tipo.
+  - El permiso vive en la **cuenta, no en el grupo**: se tiene en todos sus
+    grupos o en ninguno. Es lo que hace funcionar el caso comunitario (en
+    un coto con varios botones cada quien avisa de lo suyo y todos se
+    enteran) sin que un vecino tenga que habilitar a otro a mano.
+  - **Dos titulares por botón**: el `claimCode` impreso en la caja se
+    valida **dos veces** (`DeviceHolder`, tope en `TITULARES_POR_BOTON`).
+    Un botón es de la casa, no de una persona. El tope se comprueba
+    *después* de insertar, dentro de la transacción: contar antes deja
+    pasar dos códigos simultáneos, y no hay índice que exprese "máximo dos
+    filas por deviceId".
+  - **Cupos**: cada botón vinculado da lugar para **10 personas** en el
+    grupo (`LUGARES_POR_BOTON`). `GroupMember.seatDeviceId` dice de qué
+    botón sale cada lugar; `POST /api/groups/join` responde 409 cuando ya
+    no hay. Para crecer, alguien más tiene que unirse con su botón.
+    El lugar se le carga al botón con espacio más antiguo, no a quien
+    invitó: el código de invitación es uno solo por grupo y no dice quién
+    lo compartió. Al desvincular un botón sus miembros **no** salen del
+    grupo, se quedan "sin respaldo" hasta que entre otro botón.
+  - **Accesos comprados**: `Device.extraAccesses` son lugares completos que
+    el titular reparte entre los invitados de su grupo (`AccessGrant`,
+    `ACCESOS_POR_COMPRA = 5`). De fábrica es 0: 2 titulares + 8 invitados.
+    Con una compra: 2 + 5 completos + 3 invitados = los 7 del plan. Lo
+    mueve un administrador de la plataforma al confirmar el pago
+    (**pendiente**, ver roadmap).
+  - Endpoints en `src/routes/acceso.js`: `GET /api/acceso` (lo que pinta el
+    apartado de Códigos), `POST /api/acceso/vincular` `{ claimCode }`,
+    `POST` y `DELETE /api/acceso/otorgar` `{ deviceId, userId }`.
+  - `POST /api/groups/:id/devices/claim` acepta `claimCode` (te vuelve
+    titular **y** vincula el botón al grupo) o `deviceId` (traes al grupo
+    un botón del que ya eres titular). Solo un titular puede vincularlo:
+    es decidir a quién le avisa.
+- **Ampliar el límite: pago y panel (`src/pagos.js`, `src/comprobantes.js`,
+  `src/routes/pagos.js`, `src/routes/admin.js`)** — el cliente deposita por
+  transferencia y un administrador de la plataforma lo confirma a mano:
+  - `PaymentRequest` es **una fila por intento**, no una por cliente, y cada
+    una admite **una sola captura**. Si un comprobante se rechaza (borroso,
+    monto que no cuadra), el cliente abre otra solicitud y manda una nueva.
+    Con "una captura por cuenta" un error de foto dejaría a alguien que ya
+    pagó sin forma de comprobarlo.
+  - El cliente **no escribe texto libre**: manda mensajes de un catálogo
+    cerrado (`MENSAJES_CLIENTE`) y el backend resuelve el texto y la
+    respuesta automática. Soporte sí escribe libre. Así el hilo es
+    predecible, no hay nada que moderar y nadie acaba escribiendo datos de
+    su tarjeta donde no van.
+  - Las **capturas viven en Firebase Storage**, no en Postgres ni en el
+    disco del servidor (efímero en casi cualquier host). La PWA manda la
+    imagen cruda (`express.raw`, sin multipart ni dependencia nueva), el
+    backend la sube con la cuenta de servicio y el administrador la ve con
+    un **enlace firmado que caduca a los 15 min**: un comprobante trae
+    nombre, banco y monto de una persona, no puede quedar adivinable.
+    Requiere `FIREBASE_STORAGE_BUCKET` y los `PAGO_*` del `.env`.
+  - `POST /api/admin/solicitudes/:id/aprobar` es lo **único** que sube
+    `Device.extraAccesses` (con `updateMany` sobre el estado esperado: dos
+    administradores aprobando a la vez suman una sola vez). Hay también
+    `/rechazar` con motivo, `/mensajes` y `POST /api/admin/clientes/:id/accesos`
+    para ampliar a mano un caso raro. Todo queda en `AuditLog`.
+  - `User.isPlatformAdmin` se prende **a mano en la base**. No hay endpoint
+    que lo otorgue a propósito: sería el camino más corto para que una
+    cuenta comprometida se regale todo.
 - **Tiempo real (`src/realtime.js`, Socket.IO en el mismo puerto que la
   API)**: el socket se autentica con el mismo ID token de Firebase y entra
   solo a las salas de los grupos del usuario (nadie escucha un grupo
@@ -194,9 +259,22 @@ faltan el ESP32 físico real y tener todo publicado con HTTPS (ver roadmap).
   - Miembros sin ningún token registrado se quedan en `PENDING` a
     propósito: no es un fallo de envío, la alerta les debe aparecer dentro
     de la app cuando entren.
-  - El aviso lleva `tag` por alerta (si llega por varios lados no se
-    apila), `requireInteraction` (una emergencia no se auto-descarta) e
-    ícono PNG (`/pwa-192x192.png`; Android no muestra SVG).
+  - **Una alerta insiste; un mensaje del chat no.** El aviso de alerta se
+    manda **3 veces cada 4 s** con el mismo `tag` y `renotify`, así que
+    cada repetición vuelve a sonar en vez de apilarse muda. Se corta en
+    cuanto alguien toca "Ya voy" o "Resuelta" (se relee el estado antes de
+    cada ronda). Lleva además `requireInteraction` (no se auto-descarta),
+    patrón de `vibrate`, `Urgency: high`, la acción **"Ya voy"** y el
+    enlace directo al grupo. El aviso de chat va con `Urgency: normal`,
+    agrupado por grupo y sin insistencia.
+  - Por qué no suena como ntfy: una PWA **no puede crear su propio canal de
+    notificaciones** en Android. El sonido, la vibración y el "No molestar"
+    los decide el canal que Chrome usa para todos los sitios, y la
+    propiedad `sound` del estándar no la implementó ningún navegador.
+    Repetir el aviso es lo único que sí está en nuestras manos. Para una
+    alarma tipo sísmica hay que envolver la PWA en una app nativa
+    (Capacitor) y mandar el bloque `android.notification.channelId`.
+  - Ícono PNG (`/pwa-192x192.png`; Android no muestra SVG).
 - Seguridad: Helmet, rate limiting (30 req/min dispositivos, 120 req/min
   usuarios) y CORS:
   - **Producción**: define `FRONTEND_ORIGIN` (separado por comas si son
@@ -235,9 +313,7 @@ Proyecto nuevo: React + TypeScript + Vite + Tailwind v4 + React Router.
 - `services/notificaciones.ts` + `components/Notificaciones.tsx` — pide el
   permiso, saca el token de FCM y lo registra en el backend. Distingue los
   cuatro estados posibles (no soportado / desactivadas / bloqueadas /
-  activadas) y muestra la alerta en pantalla cuando llega con la app
-  abierta, porque en primer plano el navegador no dibuja el aviso del
-  sistema. Dos detalles importantes:
+  activadas). Dos detalles importantes:
   - Sacar **y** borrar el token siempre usa el registro del service worker
     de la app. Antes, al cerrar sesión se pedía el token sin él, Firebase
     registraba otro SW, devolvía un token distinto y el real se quedaba en
@@ -246,6 +322,33 @@ Proyecto nuevo: React + TypeScript + Vite + Tailwind v4 + React Router.
   - `onMessage` de Firebase solo guarda **un** handler (llamarlo de nuevo
     reemplaza al anterior), así que `escucharAlertasEnPrimerPlano` lo
     registra una vez y reparte el aviso a todos los que escuchan.
+- `components/AlarmaEnPantalla.tsx` + `services/sirena.ts` — con la app
+  abierta el navegador **no** dibuja la notificación del sistema, así que
+  una alerta pasaría desapercibida. El componente va montado en toda la app
+  (la alerta puede llegar en cualquier pantalla), muestra el aviso rojo con
+  "Ver alerta"/"Silenciar" y toca una **sirena**. La sirena se genera con el
+  oscilador del navegador en vez de un mp3: no hay archivo que cargar, suena
+  sin red y una notificación web no puede traer sonido propio. `prepararSirena()`
+  se llama en `main.tsx` para desbloquear el audio en el primer toque —
+  sin gesto previo el navegador no deja sonar, y esperar a la emergencia
+  sería tarde.
+- `pages/Codigos.tsx` — apartado de **Códigos**: el estado de la cuenta
+  (completa o invitada), el campo para capturar el código de la caja
+  ("Confirmar"), los botones de los que eres titular con sus accesos
+  comprados, a quién se los diste y "Ampliar límite". El código también se
+  pide, opcional, en `pages/Registro.tsx`: si falla ahí, la cuenta **no** se
+  deshace y se manda a Códigos con el motivo.
+- `pages/Pago.tsx` — el chat con los administradores: datos bancarios,
+  respuestas predeterminadas ("Ya pagué", "¿Cuánto tarda?"…) y el envío de
+  **una** captura. La imagen se valida también aquí (5 MB, JPG/PNG/WebP)
+  para no hacerle subir de más a alguien con datos móviles.
+- `pages/Admin.tsx` — panel de los administradores de la plataforma, con
+  dos vistas: **Solicitudes** (filtro por estado y búsqueda, comprobante a
+  la vista, aprobar/rechazar/escribirle) y **Clientes** (un renglón por
+  botón vendido, con quien lo registró primero, si tiene el límite ampliado
+  y "Ampliar +5"). Va dentro de la PWA y no en `SCILD-web` para no duplicar
+  sesión, cliente de API y estilos: es una ruta más, que solo abre quien
+  tiene `isPlatformAdmin` (el backend responde 403 a cualquier otro).
 - `pages/Ayuda.tsx` + `src/data/ayuda.ts` — apartado de Ayuda con preguntas
   por secciones (el botón físico, alertas y notificaciones, cuenta y
   grupos). **El contenido se edita en `src/data/ayuda.ts`**, sin tocar la
