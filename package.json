@@ -11,7 +11,8 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
-    "comprobantes:limpiar": "node scripts/limpiarComprobantes.js"
+    "comprobantes:limpiar": "node scripts/limpiarComprobantes.js",
+    "cuenta:revincular": "node scripts/revincularCuenta.js"
   },
   "dependencies": {
     "@prisma/client": "^6.4.0",
