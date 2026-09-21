@@ -494,6 +494,29 @@ Proyecto nuevo: React + TypeScript + Vite + Tailwind v4 + React Router.
 - PWA: build de producción con `vite preview` → un solo SW activo en `/`,
   manifest válido, app en caché y rutas como `/grupos/:id` cargando sin red.
 
+### Cuentas y sesión
+
+- `DELETE /api/auth/me` elimina la cuenta. Libera su lugar en el código de
+  la caja (DeviceHolder cae en cascada) y, si era el último titular, deja
+  `claimedAt` en null para que el código impreso vuelva a servir. No deja
+  irse al único administrador de un grupo con más gente, ni al único
+  miembro de un grupo con botones. Borra de Postgres primero y de Firebase
+  después.
+- El middleware de sesión contesta **409 con explicación** cuando un correo
+  ya existe en la base con otra cuenta de Firebase (pasa si se borra el
+  usuario desde la consola y se registra de nuevo). Antes era un 500 en
+  todas las rutas. Se repara a mano:
+  `npm run cuenta:revincular -- <correo>` muestra qué movería, `--si` lo
+  aplica, `--borrar` tira la fila vieja.
+- **No borres cuentas desde la consola de Firebase**: usa "Eliminar mi
+  cuenta" en la app, que limpia los dos lados.
+
+### Para probar
+
+`npm run pruebas:preparar` deja la base lista (botones de prueba con su
+código de caja, administrador de plataforma) y es idempotente. El
+`deviceSecret` solo se imprime al crear el botón.
+
 ## 5. Cómo levantar el proyecto localmente
 
 Necesitas correr backend y frontend al mismo tiempo (dos terminales):
@@ -562,7 +585,10 @@ iOS, no solo por comodidad).
 
 Ya hecho: alerta manual, pantallas de grupos, atender/resolver alertas,
 PWA instalable con push funcionando, chat del grupo en tiempo real, tipos
-de alerta, apodos, edición del grupo por el admin y dirección obligatoria.
+de alerta, apodos, edición del grupo por el admin, dirección obligatoria,
+vinculación de botones con el código de la caja, acceso por cuenta, cupos
+por botón, pagos con comprobante, panel de administración, ver/recuperar
+la contraseña y eliminar la cuenta.
 En orden sugerido:
 
 1. **Publicar con HTTPS (deploy).** Es lo que desbloquea todo lo demás: sin
@@ -610,19 +636,30 @@ En orden sugerido:
    global; en los personales se sigue usando el global ("Mamá"). El botón
    de cada casa se vincula con el código de la caja (punto 2) y toma ese
    nombre, para que la alerta diga "Se presionó Casa de Juan".
-9. **Vista de administrador para el equipo** — fuera de la PWA, como
-   herramienta interna: mismo login de Firebase con un custom claim
-   `admin`, endpoints bajo `/api/admin/*`. Prioridad de contenido:
-   dispositivos (estado/batería/última señal y alta de nuevos), alertas
-   recientes con cuánto tardaron en atenderse, entregas de push fallidas,
-   grupos y auditoría. **Sin mostrar el contenido del chat** y registrando
-   en `AuditLog` todo lo que haga un administrador.
+9. **Vista de administrador para el equipo** — hecha a medias, y DENTRO
+   de la PWA (`/admin`), no fuera como se había planeado aquí: se decidió
+   así para no duplicar sesión, cliente de API y estilos. El permiso es
+   `User.isPlatformAdmin`, que se prende a mano en la base, y sí registra
+   en `AuditLog`. Ya trae solicitudes de pago y clientes con "Ampliar +5".
+   **Falta** lo que era la prioridad original de contenido: dispositivos
+   (estado/batería/última señal y alta de nuevos), alertas recientes con
+   cuánto tardaron en atenderse, y entregas de push fallidas.
 10. **Mejoras al chat y a los grupos** (ideas, no urgentes):
    - Que el ADMIN pueda sacar a alguien del grupo (ya puede nombrar y
      quitar administradores).
    - Silenciar el chat de un grupo sin salirse de él.
    - Nota opcional al enviar una alerta ("camioneta gris, placas…").
    - Apodo por grupo (hoy es uno por persona para todos sus grupos).
+
+11. **Decisión pendiente: cuántos accesos completos trae un grupo de
+   fábrica.** La especificación del producto dice que de las 10 personas,
+   7 tengan funciones completas y 3 sean invitados. Lo implementado es 2
+   completas (los titulares) y 8 invitados, llegando a 7 solo después de
+   pagar (`ACCESOS_POR_COMPRA = 5`). La versión implementada es la única
+   que cuadra en aritmética —7 de base más 5 comprados serían 12 en un
+   grupo de 10 lugares—, pero cambia el negocio: obliga a pagar para que
+   la familia pase de 2 a 7. Sin resolver; se cambia en un renglón
+   (`src/acceso.js`) cuando se decida.
 
 ## 7. Notas de seguridad para quien se una
 
