@@ -544,8 +544,14 @@ router.post("/:id/devices/claim", userAuth, async (req, res) => {
 
   let device;
   if (esTexto(claimCode)) {
-    // Lanza ErrorDeAcceso si el código no sirve o ya se usó dos veces.
-    ({ device } = await volverseTitular({ userId: req.user.id, claimCode }));
+    // Lanza ErrorDeAcceso si el código no sirve o ya se usó dos veces. Que la
+    // cuenta YA sea titular no es error aquí: lo que se está pidiendo es
+    // meter el botón a este grupo, y para eso justamente hay que ser dueño.
+    ({ device } = await volverseTitular({
+      userId: req.user.id,
+      claimCode,
+      siYaEraTitular: "seguir",
+    }));
   } else if (esTexto(deviceId)) {
     device = await prisma.device.findUnique({ where: { id: deviceId } });
     if (!device) {

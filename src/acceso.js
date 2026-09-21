@@ -77,7 +77,14 @@ export async function cuentasCompletas(userIds) {
 // transacción: contar antes deja pasar dos códigos que llegan al mismo
 // tiempo, y "máximo dos filas por botón" no es algo que Postgres pueda
 // garantizar con un índice.
-export async function volverseTitular({ userId, claimCode }) {
+// `siYaEraTitular` decide qué pasa cuando la cuenta YA es titular del botón:
+//
+//   "error"  — lo que quiere el apartado de Códigos: ahí la acción ES vincular
+//              el botón a la cuenta, así que repetirlo no tiene sentido.
+//   "seguir" — lo que quiere vincular el botón a un GRUPO: ahí ser titular no
+//              es un problema, es el requisito. Antes reventaba aquí y nunca
+//              llegaba a tocar el grupo, que es lo único que se pedía.
+export async function volverseTitular({ userId, claimCode, siYaEraTitular = "error" }) {
   const codigo = normalizarClaimCode(claimCode);
   if (!codigo) {
     throw new ErrorDeAcceso(400, "El código de vinculación no es válido");
@@ -94,7 +101,12 @@ export async function volverseTitular({ userId, claimCode }) {
     where: { deviceId_userId: { deviceId: device.id, userId } },
   });
   if (yaEra) {
-    throw new ErrorDeAcceso(409, "Ese botón ya está vinculado a tu cuenta");
+    if (siYaEraTitular === "error") {
+      throw new ErrorDeAcceso(409, "Ese botón ya está vinculado a tu cuenta");
+    }
+    // No se vuelve a insertar ni se toca claimedAt/ownerId: ya es suyo.
+    const titulares = await prisma.deviceHolder.count({ where: { deviceId: device.id } });
+    return { device, titulares, yaEra: true };
   }
 
   return prisma.$transaction(async (tx) => {
