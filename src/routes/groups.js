@@ -4,7 +4,13 @@ import { Prisma } from "@prisma/client";
 import prisma from "../prisma.js";
 import { userAuth } from "../middleware/userAuth.js";
 import { buscarMembresia, estadoEfectivo } from "../membership.js";
-import { accesoDeCuenta, cuentasCompletas, volverseTitular, ErrorDeAcceso } from "../acceso.js";
+import {
+  accesoDeCuenta,
+  cuentasCompletas,
+  volverseTitular,
+  ErrorDeAcceso,
+  LUGARES_POR_BOTON,
+} from "../acceso.js";
 import { apartarLugar, cuposDelGrupo, respaldarMiembrosSueltos } from "../cupos.js";
 import { emitirAGrupo } from "../realtime.js";
 import { enviarPushDeMensaje } from "../push.js";
@@ -113,9 +119,18 @@ router.post("/join", userAuth, async (req, res) => {
     const membership = await prisma.$transaction(async (tx) => {
       const seatDeviceId = await apartarLugar(tx, group.id);
       if (!seatDeviceId) {
+        // Dos causas distintas con el mismo síntoma, y hay que separarlas: si
+        // el grupo no tiene NINGÚN botón no es que se hayan agotado los
+        // lugares, es que nunca hubo. Decir "que entre alguien con botón" en
+        // ese caso manda a la persona equivocada a hacer algo imposible —
+        // nadie puede entrar — cuando lo que falta es que el administrador
+        // vincule su botón al grupo.
+        const cuantosBotones = await tx.device.count({ where: { groupId: group.id } });
         throw new ErrorDeAcceso(
           409,
-          "Este grupo ya no tiene lugares libres. Para meter a más personas, alguien más con botón tiene que unirse al grupo."
+          cuantosBotones === 0
+            ? "Este grupo todavía no tiene ningún botón vinculado, y sin botón no hay lugares. El administrador del grupo tiene que vincular el suyo primero, desde Información del grupo."
+            : `Este grupo ya no tiene lugares libres (${LUGARES_POR_BOTON} por cada botón vinculado, y ya son ${cuantosBotones * LUGARES_POR_BOTON} ocupados). Para meter a más personas, alguien más con su propio botón tiene que unirse al grupo y vincularlo aquí.`
         );
       }
       return tx.groupMember.create({
