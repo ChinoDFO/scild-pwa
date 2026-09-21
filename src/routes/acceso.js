@@ -1,6 +1,7 @@
 import { Router } from "express";
 import prisma from "../prisma.js";
 import { userAuth } from "../middleware/userAuth.js";
+import { estadoEfectivo } from "../membership.js";
 import {
   accesoDeCuenta,
   accesosDelBoton,
@@ -26,7 +27,14 @@ router.get("/", userAuth, async (req, res) => {
             id: true,
             name: true,
             deviceCode: true,
-            group: { select: { id: true, name: true } },
+            // Lo que la pantalla del botón necesita para el monitoreo. La IP,
+            // la red y la señal WiFi NO están: las tendría que reportar el
+            // ESP32 y todavía no existe (la PWA las muestra como "Sin datos").
+            status: true,
+            lastSeenAt: true,
+            batteryLevel: true,
+            firmwareVersion: true,
+            group: { select: { id: true, name: true, address: true } },
           },
         }),
         accesosDelBoton(deviceId),
@@ -47,7 +55,14 @@ router.get("/", userAuth, async (req, res) => {
         id: device.id,
         nombre: device.name || device.deviceCode,
         deviceCode: device.deviceCode,
-        grupo: device.group,
+        grupo: device.group && { id: device.group.id, name: device.group.name },
+        // La dirección del botón es la del establecimiento donde está
+        // vinculado: el aparato no tiene una propia.
+        direccion: device.group?.address ?? null,
+        estado: estadoEfectivo(device, Date.now()),
+        ultimaSenal: device.lastSeenAt,
+        bateria: device.batteryLevel,
+        firmware: device.firmwareVersion,
         titulares: titulares.map((t) => ({ userId: t.user.id, nombre: comoSeLlama(t.user) })),
         accesos,
         repartidosA: repartidos.map((g) => ({

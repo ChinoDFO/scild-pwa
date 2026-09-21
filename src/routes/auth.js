@@ -37,6 +37,8 @@ router.get("/me", userAuth, async (req, res) => {
     esTitular: acceso.esTitular,
     // Administrador de la plataforma: le aparece el panel de solicitudes.
     esAdminPlataforma: req.user.isPlatformAdmin,
+    // El perfil de la app muestra desde cuándo existe la cuenta.
+    creadaEl: req.user.createdAt,
     groups: memberships.map((m, i) => ({
       id: m.group.id,
       name: m.group.name,
