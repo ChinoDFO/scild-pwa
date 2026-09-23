@@ -516,6 +516,14 @@ Cosas que ya nos hicieron perder tiempo:
 - Si FCM acepta el envío pero no ves el aviso, revisa Windows: Configuración
   → Sistema → Notificaciones (Chrome permitido, "No molestar" apagado).
 
+Si el backend contesta `Can't reach database server` en la primera petición
+y a la segunda funciona, no es la red ni el código: **Neon en plan gratis
+suspende la base** cuando lleva unos minutos sin usarse, y despertarla tarda
+varios segundos. Prisma corta la conexión a los 5 por defecto. La cadena de
+conexión lleva `connect_timeout=30` para aguantar esa espera; si clonas el
+proyecto, revisa que tu `DATABASE_URL` lo traiga. Se nota como una primera
+carga lenta (~8 s) y después todo normal.
+
 Nota para Windows: si el proyecto vive dentro de OneDrive, `npm run dev` del
 backend se reinicia solo cada rato, porque `node --watch` ve los archivos que
 OneDrive sincroniza en `node_modules`. Se acota con
