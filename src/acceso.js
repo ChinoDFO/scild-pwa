@@ -14,9 +14,9 @@ import { normalizarClaimCode } from "./claimCode.js";
 // regala y no se compra. Cualquier otra es INVITADA: lee y escribe en el chat
 // de los grupos donde la metan, pero no dispara alertas de ningún tipo.
 
-// Un botón es de la casa, no de una persona: lo comparten los dos que viven
-// ahí. Por eso el código de la caja se puede validar dos veces.
-export const TITULARES_POR_BOTON = 2;
+// Un botón es de la casa, no de una persona: lo comparten quienes viven ahí.
+// Por eso el código de la caja se puede validar tres veces.
+export const TITULARES_POR_BOTON = 3;
 
 // Cada botón da cupo para diez personas en el grupo donde está vinculado.
 export const LUGARES_POR_BOTON = 10;
@@ -107,7 +107,7 @@ export async function volverseTitular({ userId, claimCode, siYaEraTitular = "err
       // Revienta la transacción: el insert de arriba se deshace.
       throw new ErrorDeAcceso(
         409,
-        "Ese código ya se usó dos veces. Cada botón se comparte entre dos personas."
+        `Ese código ya se usó ${TITULARES_POR_BOTON} veces. Cada botón se comparte entre ${TITULARES_POR_BOTON} personas.`
       );
     }
 
