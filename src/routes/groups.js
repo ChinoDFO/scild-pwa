@@ -9,9 +9,8 @@ import {
   cuentasCompletas,
   volverseTitular,
   ErrorDeAcceso,
-  LUGARES_POR_BOTON,
 } from "../acceso.js";
-import { apartarLugar, cuposDelGrupo, respaldarMiembrosSueltos } from "../cupos.js";
+import { cupoValido, cuposDelGrupo, exigirLugar } from "../cupos.js";
 import { emitirAGrupo } from "../realtime.js";
 import { enviarPushDeMensaje } from "../push.js";
 
@@ -75,25 +74,73 @@ async function exigirAdmin(req, res) {
 }
 
 // Crea un grupo/establecimiento y hace ADMIN a quien lo crea.
+//
+// Solo puede crearlo quien tenga un botón vinculado a su cuenta: un grupo sin
+// nadie que pueda disparar una alerta es un chat, no un sistema de emergencia.
+//
+// `vincularBoton` le engancha de una vez uno de sus botones. No da ninguna
+// ventaja dentro del grupo —el cupo y los permisos no dependen de eso—, lo
+// único que cambia es a dónde llega la alerta cuando se presiona el aparato
+// físico. Se hace sin pedir el código otra vez: ya demostró ser titular.
 router.post("/", userAuth, async (req, res) => {
   const { data, error } = validarGrupo(req.body, { parcial: false });
   if (error) {
     return res.status(400).json({ error });
   }
 
-  const group = await prisma.group.create({
-    data: {
-      ...data,
-      inviteCode: generateInviteCode(),
-      members: {
-        // Sin botón todavía: su lugar queda sin respaldo hasta que vincule
-        // uno (ver respaldarMiembrosSueltos en src/cupos.js).
-        create: { userId: req.user.id, role: "ADMIN" },
+  const acceso = await accesoDeCuenta(req.user.id);
+  if (!acceso.completo) {
+    return res.status(403).json({
+      error:
+        "Para crear un grupo necesitas un botón vinculado a tu cuenta. Captura el código de su caja en Códigos.",
+    });
+  }
+
+  const { vincularBoton, deviceId } = req.body ?? {};
+  // Si pidió vincular y no dijo cuál, se toma el primero: lo normal es tener
+  // uno solo, y así el caso común no pide elegir.
+  const botonAVincular = vincularBoton
+    ? (deviceId && acceso.botones.includes(deviceId) ? deviceId : acceso.botones[0])
+    : null;
+
+  const group = await prisma.$transaction(async (tx) => {
+    const creado = await tx.group.create({
+      data: {
+        ...data,
+        inviteCode: generateInviteCode(),
+        members: { create: { userId: req.user.id, role: "ADMIN" } },
       },
-    },
+    });
+
+    if (botonAVincular) {
+      // Solo si el botón está libre: si ya avisa a otro grupo, se respeta y
+      // el grupo se crea igual. Moverlo es una decisión aparte.
+      const device = await tx.device.findUnique({
+        where: { id: botonAVincular },
+        select: { groupId: true },
+      });
+      if (device && !device.groupId) {
+        await tx.device.update({
+          where: { id: botonAVincular },
+          data: { groupId: creado.id, status: "OFFLINE" },
+        });
+        await tx.auditLog.create({
+          data: {
+            userId: req.user.id,
+            action: "DEVICE_CLAIMED",
+            entity: "Device",
+            entityId: botonAVincular,
+            metadata: { groupId: creado.id, alCrearElGrupo: true },
+          },
+        });
+      }
+    }
+
+    return creado;
   });
 
-  res.status(201).json(group);
+  const botones = await prisma.device.count({ where: { groupId: group.id } });
+  res.status(201).json({ ...group, botonesVinculados: botones });
 });
 
 // Un usuario se une a un grupo existente con el código de invitación
@@ -117,24 +164,10 @@ router.post("/join", userAuth, async (req, res) => {
     // Cada botón del grupo da cupo para diez personas. Si no hay lugar, la
     // forma de crecer es que entre alguien más con su propio botón.
     const membership = await prisma.$transaction(async (tx) => {
-      const seatDeviceId = await apartarLugar(tx, group.id);
-      if (!seatDeviceId) {
-        // Dos causas distintas con el mismo síntoma, y hay que separarlas: si
-        // el grupo no tiene NINGÚN botón no es que se hayan agotado los
-        // lugares, es que nunca hubo. Decir "que entre alguien con botón" en
-        // ese caso manda a la persona equivocada a hacer algo imposible —
-        // nadie puede entrar — cuando lo que falta es que el administrador
-        // vincule su botón al grupo.
-        const cuantosBotones = await tx.device.count({ where: { groupId: group.id } });
-        throw new ErrorDeAcceso(
-          409,
-          cuantosBotones === 0
-            ? "Este grupo todavía no tiene ningún botón vinculado, y sin botón no hay lugares. El administrador del grupo tiene que vincular el suyo primero, desde Información del grupo."
-            : `Este grupo ya no tiene lugares libres (${LUGARES_POR_BOTON} por cada botón vinculado, y ya son ${cuantosBotones * LUGARES_POR_BOTON} ocupados). Para meter a más personas, alguien más con su propio botón tiene que unirse al grupo y vincularlo aquí.`
-        );
-      }
+      // Lanza 409 con el número exacto si ya está lleno.
+      await exigirLugar(tx, group.id);
       return tx.groupMember.create({
-        data: { userId: req.user.id, groupId: group.id, role: "MEMBER", seatDeviceId },
+        data: { userId: req.user.id, groupId: group.id, role: "MEMBER" },
       });
     });
     emitirAGrupo(group.id, "grupo:actualizado", { groupId: group.id });
@@ -212,8 +245,6 @@ router.get("/:id", userAuth, async (req, res) => {
       role: m.role,
       // Titular de un botón o con un acceso regalado; si no, es invitado.
       accesoCompleto: completas.has(m.userId),
-      // De qué botón sale su lugar en el grupo.
-      seatDeviceId: m.seatDeviceId,
     })),
     // Nunca se manda secretHash al cliente.
     devices: group.devices.map((d) => ({
@@ -241,6 +272,18 @@ router.patch("/:id", userAuth, async (req, res) => {
   const { data, error } = validarGrupo(req.body, { parcial: true });
   if (error) {
     return res.status(400).json({ error });
+  }
+
+  // El cupo se valida contra la gente que YA está dentro: bajarlo por debajo
+  // dejaría al grupo en un estado imposible, y por editar un número no se
+  // saca a nadie.
+  if (req.body?.maxMembers !== undefined) {
+    const dentro = await prisma.groupMember.count({ where: { groupId: req.params.id } });
+    const problema = cupoValido(req.body.maxMembers, dentro);
+    if (problema) {
+      return res.status(400).json({ error: problema });
+    }
+    data.maxMembers = req.body.maxMembers;
   }
 
   const group = await prisma.$transaction(async (tx) => {
@@ -588,11 +631,6 @@ router.post("/:id/devices/claim", userAuth, async (req, res) => {
       data: { groupId: req.params.id, name: nombre, status: "OFFLINE" },
     });
 
-    // Sus diez lugares recogen a quien estaba sin respaldo: quien creó el
-    // grupo antes de tener botón, y los que quedaron sueltos si otro botón
-    // se desvinculó.
-    await respaldarMiembrosSueltos(tx, req.params.id, device.id);
-
     await tx.auditLog.create({
       data: {
         userId: req.user.id,
@@ -630,16 +668,12 @@ router.delete("/:id/devices/:deviceId", userAuth, async (req, res) => {
 
   await prisma.$transaction([
     // Sale del grupo, pero NO deja de ser suyo: sus titulares siguen siendo
-    // titulares (el acceso completo es de la cuenta) y el botón se puede
-    // volver a vincular a otro grupo. Lo que sí se pierde son sus diez
-    // lugares: quien los ocupaba se queda en el grupo, pero sin respaldo.
+    // titulares (el acceso completo es de la cuenta) y se puede volver a
+    // vincular aquí o en otro grupo. El cupo del grupo no se mueve: nunca
+    // dependió de los botones.
     prisma.device.update({
       where: { id: device.id },
       data: { groupId: null, status: "OFFLINE" },
-    }),
-    prisma.groupMember.updateMany({
-      where: { groupId: req.params.id, seatDeviceId: device.id },
-      data: { seatDeviceId: null },
     }),
     prisma.auditLog.create({
       data: {

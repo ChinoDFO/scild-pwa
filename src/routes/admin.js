@@ -1,7 +1,6 @@
 import { Router } from "express";
 import prisma from "../prisma.js";
 import { userAuth } from "../middleware/userAuth.js";
-import { LUGARES_POR_BOTON } from "../acceso.js";
 
 const router = Router();
 
@@ -83,7 +82,6 @@ router.get("/clientes", async (req, res) => {
         // El segundo, si ya usaron las dos validaciones del código.
         acompanante: resto[0] ? nombreDe(resto[0].user) : null,
         lugaresOcupados: d._count.seats,
-        lugaresTotales: LUGARES_POR_BOTON,
       };
     })
   );

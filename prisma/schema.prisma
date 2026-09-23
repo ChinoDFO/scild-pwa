@@ -85,6 +85,11 @@ model Group {
   address    String?
   latitude   Float?
   longitude  Float?
+  // Cuánta gente cabe. Lo edita el administrador del grupo hasta MAX_MIEMBROS
+  // (50). Antes salía de los botones vinculados —cada uno daba diez lugares—,
+  // pero eso ataba el tamaño del grupo a cuántos aparatos había dentro, que
+  // son dos cosas sin relación.
+  maxMembers Int @default(10)
   inviteCode String   @unique
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
@@ -105,21 +110,12 @@ model GroupMember {
   // mensajes trae sin leer y si el aviso push dice el mensaje o
   // "3 mensajes nuevos".
   lastReadAt   DateTime @default(now())
-  // Cada botón vinculado a un grupo da cupo para 10 personas. Esto dice de
-  // qué botón sale el lugar que ocupa esta membresía, que es lo que permite
-  // contar cuántos le quedan a cada uno: cuando un botón agota sus 10, la
-  // única forma de meter más gente es que entre otro titular con su botón.
-  // Queda en null si el botón se desvincula: la persona no se va del grupo,
-  // pero su lugar deja de estar respaldado (ver src/cupos.js).
-  seatDeviceId String?
 
   user       User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   group      Group   @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  seatDevice Device? @relation("CupoDelBoton", fields: [seatDeviceId], references: [id], onDelete: SetNull)
 
   @@unique([userId, groupId])
   @@index([groupId])
-  @@index([seatDeviceId])
 }
 
 // El Device Secret nunca se guarda en texto plano: solo su hash.
@@ -156,8 +152,6 @@ model Device {
   group          Group?                @relation(fields: [groupId], references: [id], onDelete: SetNull)
   owner          User?                 @relation("DeviceOwner", fields: [ownerId], references: [id], onDelete: SetNull)
   holders        DeviceHolder[]
-  // Las membresías que ocupan uno de los 10 lugares de este botón.
-  seats          GroupMember[]         @relation("CupoDelBoton")
   alerts         Alert[]
   events         DeviceEvent[]
   configurations DeviceConfiguration[]

@@ -18,8 +18,9 @@ import { normalizarClaimCode } from "./claimCode.js";
 // Por eso el código de la caja se puede validar tres veces.
 export const TITULARES_POR_BOTON = 3;
 
-// Cada botón da cupo para diez personas en el grupo donde está vinculado.
-export const LUGARES_POR_BOTON = 10;
+// Tope de gente en un grupo. El cupo de cada uno lo edita su administrador
+// (Group.maxMembers) y no puede pasar de aquí.
+export const MAX_MIEMBROS_POR_GRUPO = 50;
 
 // Error con código HTTP, para que las rutas no tengan que traducir mensajes.
 export class ErrorDeAcceso extends Error {
