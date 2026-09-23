@@ -144,8 +144,8 @@ router.delete("/me", userAuth, async (req, res) => {
       await tx.group.delete({ where: { id: groupId } });
     }
 
-    // Aquí caen en cascada DeviceHolder, GroupMember, AccessGrant, Message,
-    // PushToken, Notification y sus solicitudes de pago.
+    // Aquí caen en cascada DeviceHolder, GroupMember, Message, PushToken
+    // y Notification.
     await tx.user.delete({ where: { id: userId } });
 
     // Y ahora sí, los botones que quedaron sin ella.

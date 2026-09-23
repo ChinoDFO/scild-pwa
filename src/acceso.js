@@ -9,11 +9,9 @@ import { normalizarClaimCode } from "./claimCode.js";
 // quien avisa de lo suyo y todos se enteran — sin que un vecino tenga que
 // habilitar a otro a mano.
 //
-// Una cuenta es COMPLETA si:
-//   - es titular de un botón (validó el código impreso en su caja), o
-//   - un titular le regaló un acceso de los que compró (AccessGrant).
-// Cualquier otra cuenta es INVITADA: lee y escribe en el chat de los grupos
-// donde la metan, pero no dispara alertas de ningún tipo.
+// Una cuenta es COMPLETA si es titular de un botón, o sea si validó el código
+// impreso en su caja. Cualquier otra es INVITADA: lee y escribe en el chat de
+// los grupos donde la metan, pero no dispara alertas de ningún tipo.
 
 // Un botón es de la casa, no de una persona: lo comparten los dos que viven
 // ahí. Por eso el código de la caja se puede validar dos veces.
@@ -21,10 +19,6 @@ export const TITULARES_POR_BOTON = 2;
 
 // Cada botón da cupo para diez personas en el grupo donde está vinculado.
 export const LUGARES_POR_BOTON = 10;
-
-// Lo que suma cada compra: cinco accesos completos que el titular reparte
-// entre los invitados de su grupo (2 titulares + 5 = los 7 del plan).
-export const ACCESOS_POR_COMPRA = 5;
 
 // Error con código HTTP, para que las rutas no tengan que traducir mensajes.
 export class ErrorDeAcceso extends Error {
@@ -37,23 +31,18 @@ export class ErrorDeAcceso extends Error {
 // El acceso de una cuenta, resuelto de una sola vez. Se consulta seguido
 // (cada alerta, cada detalle de grupo), así que son dos consultas y ya.
 export async function accesoDeCuenta(userId) {
-  const [titularidades, regalado] = await Promise.all([
-    prisma.deviceHolder.findMany({
-      where: { userId },
-      select: { deviceId: true },
-      orderBy: { createdAt: "asc" },
-    }),
-    prisma.accessGrant.findFirst({ where: { userId }, select: { deviceId: true } }),
-  ]);
+  const titularidades = await prisma.deviceHolder.findMany({
+    where: { userId },
+    select: { deviceId: true },
+    orderBy: { createdAt: "asc" },
+  });
 
   return {
     // Lo único que hay que preguntar para dejar disparar una alerta.
-    completo: titularidades.length > 0 || regalado !== null,
+    completo: titularidades.length > 0,
     esTitular: titularidades.length > 0,
-    // Botones de los que es titular: de ahí salen sus cupos y sus accesos.
+    // Botones de los que es titular: de ahí salen sus cupos.
     botones: titularidades.map((t) => t.deviceId),
-    // De qué botón le regalaron el acceso, si no es titular de ninguno.
-    accesoDe: titularidades.length === 0 ? (regalado?.deviceId ?? null) : null,
   };
 }
 
@@ -62,12 +51,12 @@ export async function accesoDeCuenta(userId) {
 export async function cuentasCompletas(userIds) {
   if (userIds.length === 0) return new Set();
 
-  const [titulares, regalados] = await Promise.all([
-    prisma.deviceHolder.findMany({ where: { userId: { in: userIds } }, select: { userId: true } }),
-    prisma.accessGrant.findMany({ where: { userId: { in: userIds } }, select: { userId: true } }),
-  ]);
+  const titulares = await prisma.deviceHolder.findMany({
+    where: { userId: { in: userIds } },
+    select: { userId: true },
+  });
 
-  return new Set([...titulares, ...regalados].map((f) => f.userId));
+  return new Set(titulares.map((t) => t.userId));
 }
 
 // Vincula una cuenta a un botón con el código impreso en su caja. Es lo que
@@ -141,86 +130,5 @@ export async function volverseTitular({ userId, claimCode, siYaEraTitular = "err
     });
 
     return { device, titulares };
-  });
-}
-
-// Accesos comprados de un botón: cuántos hay y cuántos quedan por repartir.
-export async function accesosDelBoton(deviceId) {
-  const [device, repartidos] = await Promise.all([
-    prisma.device.findUnique({ where: { id: deviceId }, select: { extraAccesses: true } }),
-    prisma.accessGrant.count({ where: { deviceId } }),
-  ]);
-
-  const comprados = device?.extraAccesses ?? 0;
-  return { comprados, repartidos, libres: Math.max(0, comprados - repartidos) };
-}
-
-// Un titular le da acceso completo a alguien, gastando uno de los lugares que
-// compró. Sirve para la pareja que no vinculó la caja, el velador del turno
-// de noche, el hijo que sí vive en la casa.
-export async function otorgarAcceso({ deviceId, titularId, userId }) {
-  const esTitular = await prisma.deviceHolder.findUnique({
-    where: { deviceId_userId: { deviceId, userId: titularId } },
-  });
-  if (!esTitular) {
-    throw new ErrorDeAcceso(403, "Solo los titulares del botón pueden repartir sus accesos");
-  }
-
-  if (await prisma.deviceHolder.findUnique({ where: { deviceId_userId: { deviceId, userId } } })) {
-    throw new ErrorDeAcceso(409, "Esa persona ya es titular de este botón");
-  }
-
-  return prisma.$transaction(async (tx) => {
-    await tx.accessGrant.create({ data: { deviceId, userId, grantedById: titularId } });
-
-    // Mismo truco que con los titulares: se cuenta después de insertar.
-    const [device, repartidos] = await Promise.all([
-      tx.device.findUnique({ where: { id: deviceId }, select: { extraAccesses: true } }),
-      tx.accessGrant.count({ where: { deviceId } }),
-    ]);
-
-    if (repartidos > (device?.extraAccesses ?? 0)) {
-      throw new ErrorDeAcceso(
-        409,
-        "Ya no te quedan accesos por repartir. Amplía tu límite desde el apartado de Códigos."
-      );
-    }
-
-    await tx.auditLog.create({
-      data: {
-        userId: titularId,
-        action: "ACCESS_GRANTED",
-        entity: "Device",
-        entityId: deviceId,
-        metadata: { userId },
-      },
-    });
-
-    return { repartidos };
-  });
-}
-
-// Le quita el acceso a alguien y libera el lugar para dárselo a otra persona.
-export async function retirarAcceso({ deviceId, titularId, userId }) {
-  const esTitular = await prisma.deviceHolder.findUnique({
-    where: { deviceId_userId: { deviceId, userId: titularId } },
-  });
-  if (!esTitular) {
-    throw new ErrorDeAcceso(403, "Solo los titulares del botón pueden quitar sus accesos");
-  }
-
-  const { count } = await prisma.accessGrant.deleteMany({ where: { deviceId, userId } });
-  if (count === 0) {
-    throw new ErrorDeAcceso(404, "Esa persona no tiene un acceso de este botón");
-  }
-
-  await prisma.auditLog.create({
-    data: {
-      userId: titularId,
-      action: "ACCESS_REVOKED",
-      entity: "Device",
-      entityId: deviceId,
-      metadata: { userId },
-    },
   });
 }

@@ -185,70 +185,22 @@ faltan el ESP32 físico real y tener todo publicado con HTTPS (ver roadmap).
     invitó: el código de invitación es uno solo por grupo y no dice quién
     lo compartió. Al desvincular un botón sus miembros **no** salen del
     grupo, se quedan "sin respaldo" hasta que entre otro botón.
-  - **Accesos comprados**: `Device.extraAccesses` son lugares completos que
-    el titular reparte entre los invitados de su grupo (`AccessGrant`,
-    `ACCESOS_POR_COMPRA = 5`). De fábrica es 0: 2 titulares + 8 invitados.
-    Con una compra: 2 + 5 completos + 3 invitados = los 7 del plan. Lo
-    mueve un administrador de la plataforma al confirmar el pago
-    (**pendiente**, ver roadmap).
+  - Ser titular es la **única** forma de tener funciones completas: al
+    quitarse el sistema de pagos se fueron con él los accesos comprados,
+    así que un grupo con un botón queda en 2 completas + 8 invitados y no
+    hay manera de mover ese reparto (ver la decisión pendiente del roadmap).
   - Endpoints en `src/routes/acceso.js`: `GET /api/acceso` (lo que pinta el
-    apartado de Códigos), `POST /api/acceso/vincular` `{ claimCode }`,
-    `POST` y `DELETE /api/acceso/otorgar` `{ deviceId, userId }`.
+    apartado de Códigos, con el monitoreo del botón) y
+    `POST /api/acceso/vincular` `{ claimCode }`.
   - `POST /api/groups/:id/devices/claim` acepta `claimCode` (te vuelve
     titular **y** vincula el botón al grupo) o `deviceId` (traes al grupo
     un botón del que ya eres titular). Solo un titular puede vincularlo:
     es decidir a quién le avisa.
-- **Ampliar el límite: pago y panel (`src/pagos.js`, `src/comprobantes.js`,
-  `src/routes/pagos.js`, `src/routes/admin.js`)** — el cliente deposita por
-  transferencia y un administrador de la plataforma lo confirma a mano:
-  - `PaymentRequest` es **una fila por intento**, no una por cliente, y cada
-    una admite **una sola captura**. Si un comprobante se rechaza (borroso,
-    monto que no cuadra), el cliente abre otra solicitud y manda una nueva.
-    Con "una captura por cuenta" un error de foto dejaría a alguien que ya
-    pagó sin forma de comprobarlo.
-  - El cliente **no escribe texto libre**: manda mensajes de un catálogo
-    cerrado (`MENSAJES_CLIENTE`) y el backend resuelve el texto y la
-    respuesta automática. Soporte sí escribe libre. Así el hilo es
-    predecible, no hay nada que moderar y nadie acaba escribiendo datos de
-    su tarjeta donde no van.
-  - Las **capturas viven en la propia base** (`PaymentRequest.proofImage`,
-    `Bytes`). Se intentó Firebase Storage primero, pero habilitarlo obliga a
-    mover el proyecto de Firebase al plan de pago por uso; el proyecto ya
-    tiene Postgres y un comprobante de celular pesa unos cientos de
-    kilobytes, así que no hay nada que optimizar todavía. Si algún día son
-    miles, se cambia por un bucket sin tocar el resto: la imagen entra y
-    sale solo por `src/comprobantes.js`.
-  - La PWA manda la imagen **cruda** (`express.raw`, sin multipart ni
-    dependencia nueva). La imagen **nunca** viaja en el JSON de las listas:
-    esas consultas seleccionan `proofType`, que basta para saber si ya hay
-    captura. El panel la pide aparte a
-    `GET /api/admin/solicitudes/:id/comprobante`, con su sesión, y la pinta
-    como blob — un `<img src>` directo no serviría porque el navegador no
-    manda la cabecera `Authorization` al cargar una imagen, y un comprobante
-    trae nombre, banco y monto de una persona.
-  - `leerComprobante` devuelve un **Buffer** a propósito: desde Prisma 6 un
-    campo `Bytes` se lee como `Uint8Array`, y `res.send()` de Express solo
-    trata como binario a un Buffer — con cualquier otro objeto serializaría
-    la imagen a JSON.
-  - **Las capturas se sueltan solas a los 3 meses** (`src/limpieza.js`): un
-    comprobante trae nombre, banco y monto de una persona, y una vez cerrado
-    el trámite no hay razón para seguirlo guardando. Se borra la imagen pero
-    **se conserva la solicitud**, así que el historial de quién pidió qué y
-    en qué acabó sigue completo, y queda un `AuditLog` de cada barrido. Una
-    solicitud todavía abierta conserva su captura aunque tenga meses: le
-    falta que alguien la revise. Corre como temporizador dentro del proceso
-    (diario, arranca a los 5 min de encender) y no como cron del sistema:
-    nada que configurar al desplegar, y es idempotente, así que no importa
-    si lo corren varias instancias. A mano: `npm run comprobantes:limpiar`.
-  - Requiere los `PAGO_*` del `.env` (banco, CLABE, titular, monto).
-  - `POST /api/admin/solicitudes/:id/aprobar` es lo **único** que sube
-    `Device.extraAccesses` (con `updateMany` sobre el estado esperado: dos
-    administradores aprobando a la vez suman una sola vez). Hay también
-    `/rechazar` con motivo, `/mensajes` y `POST /api/admin/clientes/:id/accesos`
-    para ampliar a mano un caso raro. Todo queda en `AuditLog`.
-  - `User.isPlatformAdmin` se prende **a mano en la base**. No hay endpoint
-    que lo otorgue a propósito: sería el camino más corto para que una
-    cuenta comprometida se regale todo.
+- **Panel de administración (`src/routes/admin.js`)** — `GET /api/admin/clientes`:
+  un renglón por botón registrado, con quien lo dio de alta, quién lo
+  comparte y cuánto de su cupo se usa. `User.isPlatformAdmin` se prende **a
+  mano en la base**; no hay endpoint que lo otorgue a propósito, sería el
+  camino más corto para que una cuenta comprometida se regale todo.
 - **Tiempo real (`src/realtime.js`, Socket.IO en el mismo puerto que la
   API)**: el socket se autentica con el mismo ID token de Firebase y entra
   solo a las salas de los grupos del usuario (nadie escucha un grupo
@@ -357,19 +309,13 @@ Proyecto nuevo: React + TypeScript + Vite + Tailwind v4 + React Router.
   sería tarde.
 - `pages/Codigos.tsx` — apartado de **Códigos**: el estado de la cuenta
   (completa o invitada), el campo para capturar el código de la caja
-  ("Confirmar"), los botones de los que eres titular con sus accesos
-  comprados, a quién se los diste y "Ampliar límite". El código también se
-  pide, opcional, en `pages/Registro.tsx`: si falla ahí, la cuenta **no** se
-  deshace y se manda a Códigos con el motivo.
-- `pages/Pago.tsx` — el chat con los administradores: datos bancarios,
-  respuestas predeterminadas ("Ya pagué", "¿Cuánto tarda?"…) y el envío de
-  **una** captura. La imagen se valida también aquí (5 MB, JPG/PNG/WebP)
-  para no hacerle subir de más a alguien con datos móviles.
-- `pages/Admin.tsx` — panel de los administradores de la plataforma, con
-  dos vistas: **Solicitudes** (filtro por estado y búsqueda, comprobante a
-  la vista, aprobar/rechazar/escribirle) y **Clientes** (un renglón por
-  botón vendido, con quien lo registró primero, si tiene el límite ampliado
-  y "Ampliar +5"). Va dentro de la PWA y no en `SCILD-web` para no duplicar
+  ("Confirmar") y los botones de los que eres titular, con sus dos
+  titulares y el monitoreo. El código también se pide, opcional, en
+  `pages/Registro.tsx`: si falla ahí, la cuenta **no** se deshace y se
+  manda a Códigos con el motivo.
+- `pages/Admin.tsx` — panel de los administradores de la plataforma: la
+  lista de clientes (un renglón por botón registrado, con quien lo dio de
+  alta y su cupo). Va dentro de la PWA y no en `SCILD-web` para no duplicar
   sesión, cliente de API y estilos: es una ruta más, que solo abre quien
   tiene `isPlatformAdmin` (el backend responde 403 a cualquier otro).
 - `pages/Ayuda.tsx` + `src/data/ayuda.ts` — apartado de Ayuda con preguntas
@@ -587,8 +533,14 @@ Ya hecho: alerta manual, pantallas de grupos, atender/resolver alertas,
 PWA instalable con push funcionando, chat del grupo en tiempo real, tipos
 de alerta, apodos, edición del grupo por el admin, dirección obligatoria,
 vinculación de botones con el código de la caja, acceso por cuenta, cupos
-por botón, pagos con comprobante, panel de administración, ver/recuperar
-la contraseña y eliminar la cuenta.
+por botón, panel de administración, ver/recuperar la contraseña y eliminar
+la cuenta.
+
+**Quitado el 22 de septiembre**: el sistema de pagos completo (solicitudes,
+chat con datos bancarios, comprobante con foto, aprobación desde el panel)
+y con él los accesos comprados (`AccessGrant`, `Device.extraAccesses`). Un
+botón da funciones completas a sus dos titulares y ya; no hay nada que
+comprar. Está en el historial de git si alguna vez hace falta revivirlo.
 En orden sugerido:
 
 1. **Publicar con HTTPS (deploy).** Es lo que desbloquea todo lo demás: sin
@@ -640,7 +592,8 @@ En orden sugerido:
    de la PWA (`/admin`), no fuera como se había planeado aquí: se decidió
    así para no duplicar sesión, cliente de API y estilos. El permiso es
    `User.isPlatformAdmin`, que se prende a mano en la base, y sí registra
-   en `AuditLog`. Ya trae solicitudes de pago y clientes con "Ampliar +5".
+   en `AuditLog`. Ya trae la lista de clientes (un renglón por botón
+   registrado, con quien lo dio de alta y su cupo).
    **Falta** lo que era la prioridad original de contenido: dispositivos
    (estado/batería/última señal y alta de nuevos), alertas recientes con
    cuánto tardaron en atenderse, y entregas de push fallidas.
@@ -651,15 +604,15 @@ En orden sugerido:
    - Nota opcional al enviar una alerta ("camioneta gris, placas…").
    - Apodo por grupo (hoy es uno por persona para todos sus grupos).
 
-11. **Decisión pendiente: cuántos accesos completos trae un grupo de
-   fábrica.** La especificación del producto dice que de las 10 personas,
-   7 tengan funciones completas y 3 sean invitados. Lo implementado es 2
-   completas (los titulares) y 8 invitados, llegando a 7 solo después de
-   pagar (`ACCESOS_POR_COMPRA = 5`). La versión implementada es la única
-   que cuadra en aritmética —7 de base más 5 comprados serían 12 en un
-   grupo de 10 lugares—, pero cambia el negocio: obliga a pagar para que
-   la familia pase de 2 a 7. Sin resolver; se cambia en un renglón
-   (`src/acceso.js`) cuando se decida.
+11. **Decisión pendiente, ahora más urgente: cuántas cuentas completas
+   trae un grupo.** La especificación del producto dice que de las 10
+   personas, 7 tengan funciones completas y 3 sean invitados. Lo
+   implementado son 2 (los titulares) y 8 invitados. Antes la diferencia
+   se cerraba pagando; al quitarse los pagos **ya no hay forma de llegar a
+   7**, así que o se acepta que un grupo tenga dos cuentas capaces de
+   alertar, o hay que decidir otro mecanismo (que el titular reparta N
+   accesos sin cobrar, que el código valga más veces, o que todo miembro
+   sea completo). Hoy el código no ofrece ninguno.
 
 ## 7. Notas de seguridad para quien se una
 
