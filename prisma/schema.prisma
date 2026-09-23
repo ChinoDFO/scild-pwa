@@ -66,15 +66,15 @@ model User {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
-  memberships      GroupMember[]
-  devices          Device[]         @relation("DeviceOwner")
+  memberships   GroupMember[]
+  devices       Device[]       @relation("DeviceOwner")
   // Botones de los que es titular (el código de la caja se valida 2 veces).
-  titularidades    DeviceHolder[]
-  messages         Message[]
-  alertsCreated    Alert[]          @relation("AlertCreatedBy")
-  notifications    Notification[]
-  pushTokens       PushToken[]
-  auditLogs        AuditLog[]
+  titularidades DeviceHolder[]
+  messages      Message[]
+  alertsCreated Alert[]        @relation("AlertCreatedBy")
+  notifications Notification[]
+  pushTokens    PushToken[]
+  auditLogs     AuditLog[]
 
   @@index([email])
 }
@@ -171,6 +171,9 @@ model Device {
 // ahí, y ambos tienen las funciones completas de la app. El resto de la
 // familia (que vive en otro lado) entra como invitado: se entera, pero no
 // dispara alarmas del coto ajeno.
+//
+// Son los únicos con funciones completas: al quitarse los accesos
+// comprados, ser titular es la única forma de poder disparar alertas.
 //
 // El tope de 2 se aplica en src/acceso.js, no en la base: la restricción
 // "máximo N filas por deviceId" no existe en SQL sin un trigger, y la

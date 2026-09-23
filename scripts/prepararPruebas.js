@@ -1,5 +1,5 @@
-// Deja la base lista para probar el acceso por botón y los cupos de los
-// grupos, y escupe todos los datos que hacen falta para hacerlo.
+// Deja la base lista para probar el sistema de acceso y cupos, y
+// escupe todos los datos que hacen falta para hacerlo.
 //
 // Es IDEMPOTENTE: correrlo dos veces no duplica nada ni revoca nada. Lo que
 // no se puede repetir es el deviceSecret — en la base solo queda su hash, así
@@ -135,8 +135,8 @@ async function main() {
   console.log("\n--- REGLAS VIGENTES EN EL CÓDIGO ---");
   console.log(`  titulares por botón        : ${TITULARES_POR_BOTON}`);
   console.log(`  lugares por botón en grupo : ${LUGARES_POR_BOTON}`);
-  console.log(`  => en un grupo con 1 botón hay ${TITULARES_POR_BOTON} cuentas que pueden`);
-  console.log(`     alertar y ${LUGARES_POR_BOTON - TITULARES_POR_BOTON} invitados. Eso no se amplía: es la regla.
+  console.log(`  => un grupo con 1 botón tiene ${TITULARES_POR_BOTON} cuentas completas`);
+  console.log(`     y ${LUGARES_POR_BOTON - TITULARES_POR_BOTON} invitados. Sin pagos no hay forma de mover ese reparto.
 `);
 
   await prisma.$disconnect();

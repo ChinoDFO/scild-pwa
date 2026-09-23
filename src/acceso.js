@@ -11,9 +11,8 @@ import { normalizarClaimCode } from "./claimCode.js";
 //
 // Una cuenta es COMPLETA si es titular de un botón, o sea si validó el código
 // impreso en su caja. No hay otra forma: el permiso no se presta, no se
-// regala y no se compra. Cualquier otra cuenta es INVITADA: lee y escribe en
-// el chat de los grupos donde la metan, pero no dispara alertas de ningún
-// tipo.
+// regala y no se compra. Cualquier otra es INVITADA: lee y escribe en el chat
+// de los grupos donde la metan, pero no dispara alertas de ningún tipo.
 
 // Un botón es de la casa, no de una persona: lo comparten los dos que viven
 // ahí. Por eso el código de la caja se puede validar dos veces.
@@ -31,7 +30,7 @@ export class ErrorDeAcceso extends Error {
 }
 
 // El acceso de una cuenta, resuelto de una sola vez. Se consulta seguido
-// (cada alerta, cada detalle de grupo), así que es una sola consulta.
+// (cada alerta, cada detalle de grupo), así que son dos consultas y ya.
 export async function accesoDeCuenta(userId) {
   const titularidades = await prisma.deviceHolder.findMany({
     where: { userId },
@@ -43,7 +42,7 @@ export async function accesoDeCuenta(userId) {
     // Lo único que hay que preguntar para dejar disparar una alerta.
     completo: titularidades.length > 0,
     esTitular: titularidades.length > 0,
-    // Botones de los que es titular: de ahí salen los cupos de sus grupos.
+    // Botones de los que es titular: de ahí salen sus cupos.
     botones: titularidades.map((t) => t.deviceId),
   };
 }
@@ -58,7 +57,7 @@ export async function cuentasCompletas(userIds) {
     select: { userId: true },
   });
 
-  return new Set(titulares.map((f) => f.userId));
+  return new Set(titulares.map((t) => t.userId));
 }
 
 // Vincula una cuenta a un botón con el código impreso en su caja. Es lo que
@@ -134,4 +133,3 @@ export async function volverseTitular({ userId, claimCode, siYaEraTitular = "err
     return { device, titulares };
   });
 }
-

@@ -8,6 +8,7 @@ import groupsRouter from "./routes/groups.js";
 import notificationsRouter from "./routes/notifications.js";
 import alertsRouter from "./routes/alerts.js";
 import accesoRouter from "./routes/acceso.js";
+import adminRouter from "./routes/admin.js";
 import { origenesPermitidos } from "./origenes.js";
 
 const app = express();
@@ -40,6 +41,7 @@ app.use("/api/groups", userLimiter, groupsRouter);
 app.use("/api/notifications", userLimiter, notificationsRouter);
 app.use("/api/alerts", userLimiter, alertsRouter);
 app.use("/api/acceso", userLimiter, accesoRouter);
+app.use("/api/admin", userLimiter, adminRouter);
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 

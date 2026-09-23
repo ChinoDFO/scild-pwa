@@ -7,8 +7,8 @@ import { accesoDeCuenta, volverseTitular } from "../acceso.js";
 const router = Router();
 
 // Lo que pinta el apartado de "Códigos": si la cuenta tiene las funciones
-// completas, de qué botones es titular, cuántos accesos comprados le quedan
-// por repartir y a quién se los dio.
+// completas y de qué botones es titular, con lo que la pantalla del botón
+// necesita para el monitoreo.
 router.get("/", userAuth, async (req, res) => {
   const acceso = await accesoDeCuenta(req.user.id);
 

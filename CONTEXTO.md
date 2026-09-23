@@ -163,10 +163,10 @@ faltan el ESP32 físico real y tener todo publicado con HTTPS (ver roadmap).
     el heartbeat conserva ese estado). Quién hizo qué queda en `AuditLog`.
 - **Acceso de la cuenta (`src/acceso.js`) y cupos (`src/cupos.js`)** — el
   sistema de discriminación entre quien tiene botón y quien no:
-  - Una cuenta es **completa** (puede disparar alertas) si y solo si es
-    **titular** de un botón. No hay otra forma: el permiso no se presta, no
-    se regala y no se compra. Cualquier otra es **invitada**: lee y escribe
-    en el chat de sus grupos, pero no dispara alertas de ningún tipo.
+  - Una cuenta es **completa** (puede disparar alertas) si es **titular**
+    de un botón o si un titular le regaló uno de los accesos que compró.
+    Cualquier otra es **invitada**: lee y escribe en el chat de sus grupos,
+    pero no dispara alertas de ningún tipo.
   - El permiso vive en la **cuenta, no en el grupo**: se tiene en todos sus
     grupos o en ninguno. Es lo que hace funcionar el caso comunitario (en
     un coto con varios botones cada quien avisa de lo suyo y todos se
@@ -185,19 +185,24 @@ faltan el ESP32 físico real y tener todo publicado con HTTPS (ver roadmap).
     invitó: el código de invitación es uno solo por grupo y no dice quién
     lo compartió. Al desvincular un botón sus miembros **no** salen del
     grupo, se quedan "sin respaldo" hasta que entre otro botón.
-  - **No hay forma de ampliar quién puede alertar.** Un grupo con un botón
-    tiene 2 cuentas completas y 8 invitadas, y así se queda. Para que más
-    gente del mismo lugar pueda avisar, cada quien necesita su propio
-    botón: al vincularlo al grupo, sus titulares también alertan. Ojo con
-    no confundir los dos números: los **lugares** dicen cuánta gente cabe
-    en el grupo, los **titulares** quién puede disparar alertas.
+  - Ser titular es la **única** forma de tener funciones completas: al
+    quitarse el sistema de pagos se fueron con él los accesos comprados,
+    así que un grupo con un botón queda en 2 completas + 8 invitados y no
+    hay manera de mover ese reparto (ver la decisión pendiente del roadmap).
+    Ojo con no confundir los dos números: los **lugares** dicen cuánta gente
+    cabe en el grupo, los **titulares** quién puede disparar alertas.
   - Endpoints en `src/routes/acceso.js`: `GET /api/acceso` (lo que pinta el
-    apartado de Códigos) y `POST /api/acceso/vincular` `{ claimCode }`.
+    apartado de Códigos, con el monitoreo del botón) y
+    `POST /api/acceso/vincular` `{ claimCode }`.
   - `POST /api/groups/:id/devices/claim` acepta `claimCode` (te vuelve
     titular **y** vincula el botón al grupo) o `deviceId` (traes al grupo
     un botón del que ya eres titular). Solo un titular puede vincularlo:
     es decidir a quién le avisa.
-
+- **Panel de administración (`src/routes/admin.js`)** — `GET /api/admin/clientes`:
+  un renglón por botón registrado, con quien lo dio de alta, quién lo
+  comparte y cuánto de su cupo se usa. `User.isPlatformAdmin` se prende **a
+  mano en la base**; no hay endpoint que lo otorgue a propósito, sería el
+  camino más corto para que una cuenta comprometida se regale todo.
 - **Tiempo real (`src/realtime.js`, Socket.IO en el mismo puerto que la
   API)**: el socket se autentica con el mismo ID token de Firebase y entra
   solo a las salas de los grupos del usuario (nadie escucha un grupo
@@ -306,12 +311,15 @@ Proyecto nuevo: React + TypeScript + Vite + Tailwind v4 + React Router.
   sería tarde.
 - `pages/Codigos.tsx` — apartado de **Códigos**: el estado de la cuenta
   (completa o invitada), el campo para capturar el código de la caja
-  ("Confirmar") y los botones de los que eres titular con sus dos
-  titulares. El código también se
-  pide, opcional, en `pages/Registro.tsx`: si falla ahí, la cuenta **no** se
-  deshace y se manda a Códigos con el motivo.
-
-
+  ("Confirmar") y los botones de los que eres titular, con sus dos
+  titulares y el monitoreo. El código también se pide, opcional, en
+  `pages/Registro.tsx`: si falla ahí, la cuenta **no** se deshace y se
+  manda a Códigos con el motivo.
+- `pages/Admin.tsx` — panel de los administradores de la plataforma: la
+  lista de clientes (un renglón por botón registrado, con quien lo dio de
+  alta y su cupo). Va dentro de la PWA y no en `SCILD-web` para no duplicar
+  sesión, cliente de API y estilos: es una ruta más, que solo abre quien
+  tiene `isPlatformAdmin` (el backend responde 403 a cualquier otro).
 - `pages/Ayuda.tsx` + `src/data/ayuda.ts` — apartado de Ayuda con preguntas
   por secciones (el botón físico, alertas y notificaciones, cuenta y
   grupos). **El contenido se edita en `src/data/ayuda.ts`**, sin tocar la
@@ -510,6 +518,14 @@ Cosas que ya nos hicieron perder tiempo:
 - Si FCM acepta el envío pero no ves el aviso, revisa Windows: Configuración
   → Sistema → Notificaciones (Chrome permitido, "No molestar" apagado).
 
+Si el backend contesta `Can't reach database server` en la primera petición
+y a la segunda funciona, no es la red ni el código: **Neon en plan gratis
+suspende la base** cuando lleva unos minutos sin usarse, y despertarla tarda
+varios segundos. Prisma corta la conexión a los 5 por defecto. La cadena de
+conexión lleva `connect_timeout=30` para aguantar esa espera; si clonas el
+proyecto, revisa que tu `DATABASE_URL` lo traiga. Se nota como una primera
+carga lenta (~8 s) y después todo normal.
+
 Nota para Windows: si el proyecto vive dentro de OneDrive, `npm run dev` del
 backend se reinicia solo cada rato, porque `node --watch` ve los archivos que
 OneDrive sincroniza en `node_modules`. Se acota con
@@ -527,13 +543,14 @@ Ya hecho: alerta manual, pantallas de grupos, atender/resolver alertas,
 PWA instalable con push funcionando, chat del grupo en tiempo real, tipos
 de alerta, apodos, edición del grupo por el admin, dirección obligatoria,
 vinculación de botones con el código de la caja, acceso por cuenta, cupos
-por botón, ver/recuperar la contraseña, eliminar la cuenta y el rediseño de
-la app sobre los mockups.
+por botón, panel de administración, ver/recuperar la contraseña y eliminar
+la cuenta.
 
-Quitado a propósito (2026-09-21): transferir accesos entre cuentas y
-ampliar el límite pagando, con todo lo que colgaba de eso (chat de pago,
-comprobantes y panel de administración). La regla quedó en una sola: un
-botón se vincula a dos personas y nadie más alerta con él.
+**Quitado el 22 de septiembre**: el sistema de pagos completo (solicitudes,
+chat con datos bancarios, comprobante con foto, aprobación desde el panel)
+y con él los accesos comprados (`AccessGrant`, `Device.extraAccesses`). Un
+botón da funciones completas a sus dos titulares y ya; no hay nada que
+comprar. Está en el historial de git si alguna vez hace falta revivirlo.
 En orden sugerido:
 
 1. **Publicar con HTTPS (deploy).** Es lo que desbloquea todo lo demás: sin
@@ -585,7 +602,8 @@ En orden sugerido:
    de la PWA (`/admin`), no fuera como se había planeado aquí: se decidió
    así para no duplicar sesión, cliente de API y estilos. El permiso es
    `User.isPlatformAdmin`, que se prende a mano en la base, y sí registra
-   en `AuditLog`. Ya trae solicitudes de pago y clientes con "Ampliar +5".
+   en `AuditLog`. Ya trae la lista de clientes (un renglón por botón
+   registrado, con quien lo dio de alta y su cupo).
    **Falta** lo que era la prioridad original de contenido: dispositivos
    (estado/batería/última señal y alta de nuevos), alertas recientes con
    cuánto tardaron en atenderse, y entregas de push fallidas.
@@ -596,9 +614,15 @@ En orden sugerido:
    - Nota opcional al enviar una alerta ("camioneta gris, placas…").
    - Apodo por grupo (hoy es uno por persona para todos sus grupos).
 
-11. ~~Decisión de cuántos accesos completos trae un grupo de fábrica~~ ✅
-   Zanjada al quitar el sistema de pago: son dos titulares, punto.
-
+11. **Decisión pendiente, ahora más urgente: cuántas cuentas completas
+   trae un grupo.** La especificación del producto dice que de las 10
+   personas, 7 tengan funciones completas y 3 sean invitados. Lo
+   implementado son 2 (los titulares) y 8 invitados. Antes la diferencia
+   se cerraba pagando; al quitarse los pagos **ya no hay forma de llegar a
+   7**, así que o se acepta que un grupo tenga dos cuentas capaces de
+   alertar, o hay que decidir otro mecanismo (que el titular reparta N
+   accesos sin cobrar, que el código valga más veces, o que todo miembro
+   sea completo). Hoy el código no ofrece ninguno.
 
 ## 7. Notas de seguridad para quien se una
 
