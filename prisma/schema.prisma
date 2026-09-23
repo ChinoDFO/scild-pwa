@@ -44,21 +44,6 @@ enum DeviceEventType {
   DISCONNECTED
 }
 
-// Solicitud de ampliación de límite: el cliente paga por transferencia y un
-// administrador de la plataforma la confirma a mano.
-enum PaymentStatus {
-  ABIERTA // esperando que pague y mande su comprobante
-  EN_REVISION // ya mandó la captura, falta que la revisemos
-  APROBADA
-  RECHAZADA
-  CANCELADA // el propio cliente la dio de baja
-}
-
-enum PaymentAuthor {
-  CLIENTE
-  SOPORTE
-}
-
 enum NotificationStatus {
   PENDING
   SENT
@@ -85,17 +70,11 @@ model User {
   devices          Device[]         @relation("DeviceOwner")
   // Botones de los que es titular (el código de la caja se valida 2 veces).
   titularidades    DeviceHolder[]
-  // Acceso completo que le regaló un titular, y los que él ha regalado.
-  accesoRecibido   AccessGrant[]    @relation("AccesoRecibido")
-  accesosOtorgados AccessGrant[]    @relation("AccesoOtorgado")
   messages         Message[]
   alertsCreated    Alert[]          @relation("AlertCreatedBy")
   notifications    Notification[]
   pushTokens       PushToken[]
   auditLogs        AuditLog[]
-  solicitudes      PaymentRequest[] @relation("SolicitanteDelPago")
-  pagosRevisados   PaymentRequest[] @relation("RevisorDelPago")
-  mensajesDePago   PaymentMessage[]
 
   @@index([email])
 }
@@ -168,11 +147,6 @@ model Device {
   batteryLevel      Int?
   lastSeenAt        DateTime?
   heartbeatInterval Int          @default(60)
-  // Accesos completos comprados. De fábrica un botón solo da funciones
-  // completas a sus 2 titulares; cada compra suma 5 lugares que el titular
-  // puede repartir entre los invitados de su grupo (ver AccessGrant). Lo
-  // mueve un administrador de la plataforma al confirmar el pago.
-  extraAccesses     Int          @default(0)
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
 
@@ -182,8 +156,6 @@ model Device {
   group          Group?                @relation(fields: [groupId], references: [id], onDelete: SetNull)
   owner          User?                 @relation("DeviceOwner", fields: [ownerId], references: [id], onDelete: SetNull)
   holders        DeviceHolder[]
-  grants         AccessGrant[]
-  solicitudes    PaymentRequest[]
   // Las membresías que ocupan uno de los 10 lugares de este botón.
   seats          GroupMember[]         @relation("CupoDelBoton")
   alerts         Alert[]
@@ -215,95 +187,6 @@ model DeviceHolder {
   // La misma persona no ocupa los dos lugares del mismo botón.
   @@unique([deviceId, userId])
   @@index([userId])
-}
-
-// Acceso completo que un titular le da a alguien más, con los lugares que
-// compró (Device.extraAccesses). Es lo que convierte a un invitado en una
-// cuenta que puede disparar alertas.
-//
-// Va contra el botón y no contra el titular porque los dos titulares de un
-// botón comparten la misma casa y la misma compra.
-model AccessGrant {
-  id          String   @id @default(uuid())
-  deviceId    String
-  // Quién recibe el acceso completo.
-  userId      String
-  // Cuál de los dos titulares lo otorgó (para la bitácora).
-  grantedById String
-  createdAt   DateTime @default(now())
-
-  device    Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
-  user      User   @relation("AccesoRecibido", fields: [userId], references: [id], onDelete: Cascade)
-  grantedBy User   @relation("AccesoOtorgado", fields: [grantedById], references: [id], onDelete: Cascade)
-
-  @@unique([deviceId, userId])
-  @@index([userId])
-}
-
-// Una solicitud de ampliación de límite, de principio a fin: el cliente la
-// abre, se le muestran los datos bancarios, deposita, manda UNA captura y un
-// administrador la confirma. Al aprobarla se le suman ACCESOS_POR_COMPRA
-// lugares completos al botón (Device.extraAccesses).
-//
-// Es una fila por intento, no una por cliente: si una captura se rechaza
-// (borrosa, monto que no cuadra), el cliente abre otra solicitud y manda una
-// captura nueva. Con "una captura por cuenta" un error de foto dejaría a
-// alguien que ya pagó sin forma de comprobarlo.
-model PaymentRequest {
-  id           String        @id @default(uuid())
-  userId       String
-  deviceId     String
-  status       PaymentStatus @default(ABIERTA)
-  // La captura del pago, guardada aquí mismo. Se eligió la base y no un
-  // servicio de archivos porque el proyecto ya tiene Postgres y no hay que
-  // pagar ni configurar nada más: un comprobante de celular pesa unos cientos
-  // de kilobytes y son unos pocos por cliente.
-  //
-  // OJO: no la selecciones en las consultas de lista. Solo la lee la ruta que
-  // se la sirve al administrador; traerla de más carga megabytes a memoria sin
-  // que nadie los use.
-  proofImage   Bytes?
-  // El tipo de la imagen (image/jpeg, image/png...). Sirve para servirla con
-  // la cabecera correcta y, de paso, para saber si ya hay comprobante sin
-  // tener que leer los bytes.
-  proofType    String?
-  proofAt      DateTime?
-  reviewedById String?
-  reviewedAt   DateTime?
-  // Por qué se rechazó, para que el cliente sepa qué corregir.
-  note         String?
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
-
-  user       User             @relation("SolicitanteDelPago", fields: [userId], references: [id], onDelete: Cascade)
-  device     Device           @relation(fields: [deviceId], references: [id], onDelete: Cascade)
-  reviewedBy User?            @relation("RevisorDelPago", fields: [reviewedById], references: [id], onDelete: SetNull)
-  messages   PaymentMessage[]
-
-  @@index([status, createdAt])
-  @@index([userId])
-}
-
-// El chat de la solicitud. El cliente NO escribe texto libre: manda mensajes
-// de un catálogo cerrado (src/pagos.js) y el backend resuelve el texto. Así
-// el hilo es predecible, no hay nada que moderar y el cliente no puede
-// escribir datos sensibles donde no van.
-model PaymentMessage {
-  id        String        @id @default(uuid())
-  requestId String
-  from      PaymentAuthor
-  // Id del mensaje del catálogo (YA_PAGUE, CUANTO_TARDA...) o TEXTO cuando
-  // lo escribe soporte.
-  kind      String
-  body      String
-  // Quién lo mandó. Null cuando es un mensaje automático de la plataforma.
-  userId    String?
-  createdAt DateTime      @default(now())
-
-  request PaymentRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
-  user    User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
-
-  @@index([requestId, createdAt])
 }
 
 // Bitácora cruda de todo lo que manda el dispositivo (heartbeat, panic,
