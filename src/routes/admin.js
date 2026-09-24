@@ -1,6 +1,7 @@
 import { Router } from "express";
 import prisma from "../prisma.js";
 import { userAuth } from "../middleware/userAuth.js";
+import { TITULARES_POR_BOTON } from "../acceso.js";
 
 const router = Router();
 
@@ -25,7 +26,9 @@ router.use(userAuth, (req, res, next) => {
 const nombreDe = (u) => u?.displayName || u?.email || "—";
 
 // Un renglón por botón registrado, con quien lo registró primero (el cliente
-// de verdad), quién lo comparte y cuánto de su cupo se está usando.
+// de verdad) y con quién lo comparte. Ya no dice "lugares ocupados": el cupo
+// dejó de salir de los botones y ahora es del grupo, editable por su
+// administrador (ver src/cupos.js).
 router.get("/clientes", async (req, res) => {
   const { q } = req.query;
 
@@ -51,7 +54,6 @@ router.get("/clientes", async (req, res) => {
       deviceCode: true,
       createdAt: true,
       group: { select: { name: true } },
-      _count: { select: { seats: true } },
       holders: {
         orderBy: { createdAt: "asc" },
         select: {
@@ -79,9 +81,11 @@ router.get("/clientes", async (req, res) => {
           email: primero.user.email,
           registradoEl: primero.createdAt,
         },
-        // El segundo, si ya usaron las dos validaciones del código.
-        acompanante: resto[0] ? nombreDe(resto[0].user) : null,
-        lugaresOcupados: d._count.seats,
+        // Con quién más lo comparte: el código de la caja vale para tres
+        // personas, así que aquí pueden salir hasta dos nombres.
+        acompanantes: resto.map((h) => nombreDe(h.user)),
+        titulares: d.holders.length,
+        titularesTotales: TITULARES_POR_BOTON,
       };
     })
   );

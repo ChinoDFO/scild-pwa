@@ -16,7 +16,7 @@ import crypto from "node:crypto";
 import bcrypt from "bcryptjs";
 import prisma from "../src/prisma.js";
 import { generarClaimCode, formatearClaimCode } from "../src/claimCode.js";
-import { LUGARES_POR_BOTON, TITULARES_POR_BOTON } from "../src/acceso.js";
+import { MAX_MIEMBROS_POR_GRUPO, TITULARES_POR_BOTON } from "../src/acceso.js";
 
 const ADMIN = "scild2154@gmail.com";
 
@@ -133,10 +133,10 @@ async function main() {
   }
 
   console.log("\n--- REGLAS VIGENTES EN EL CÓDIGO ---");
-  console.log(`  titulares por botón        : ${TITULARES_POR_BOTON}`);
-  console.log(`  lugares por botón en grupo : ${LUGARES_POR_BOTON}`);
-  console.log(`  => un grupo con 1 botón tiene ${TITULARES_POR_BOTON} cuentas completas`);
-  console.log(`     y ${LUGARES_POR_BOTON - TITULARES_POR_BOTON} invitados. Sin pagos no hay forma de mover ese reparto.
+  console.log(`  titulares por botón : ${TITULARES_POR_BOTON}`);
+  console.log(`  cupo de un grupo    : lo edita su administrador, hasta ${MAX_MIEMBROS_POR_GRUPO}`);
+  console.log(`  => un grupo con 1 botón tiene ${TITULARES_POR_BOTON} cuentas que pueden alertar;`);
+  console.log(`     los demás entran como invitados. El cupo ya no sale de los botones.
 `);
 
   await prisma.$disconnect();

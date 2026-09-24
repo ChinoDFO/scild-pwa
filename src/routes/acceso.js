@@ -65,7 +65,7 @@ router.get("/", userAuth, async (req, res) => {
 });
 
 // Vincula esta cuenta a un botón con el código impreso en su caja. El mismo
-// código sirve para dos personas: la casa, no una persona.
+// código sirve para tres personas: la casa, no una persona.
 //
 // Se llama desde el registro (el campo opcional de código) y desde el
 // apartado de Códigos, para quien creó su cuenta antes de comprar el botón.
@@ -81,7 +81,7 @@ router.post("/vincular", userAuth, async (req, res) => {
     id: device.id,
     deviceCode: device.deviceCode,
     nombre: device.name || device.deviceCode,
-    // 1 = eres el primero; 2 = ya estaban los dos lugares de este botón.
+    // Qué número de titular te tocó (1 = eres el primero, 3 = el último).
     titulares,
     // El botón todavía tiene que vincularse a un grupo para que avise.
     groupId: device.groupId,

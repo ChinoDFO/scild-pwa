@@ -161,8 +161,8 @@ router.post("/join", userAuth, async (req, res) => {
   }
 
   try {
-    // Cada botón del grupo da cupo para diez personas. Si no hay lugar, la
-    // forma de crecer es que entre alguien más con su propio botón.
+    // El cupo es del grupo y lo edita su administrador. Si ya está lleno, la
+    // forma de crecer es que lo suba (hasta 50), no meter otro botón.
     const membership = await prisma.$transaction(async (tx) => {
       // Lanza 409 con el número exacto si ya está lleno.
       await exigirLugar(tx, group.id);
@@ -235,7 +235,7 @@ router.get("/:id", userAuth, async (req, res) => {
     // Si esta persona puede disparar alertas. Es propiedad de su cuenta, no
     // de este grupo: la PWA esconde el botón SOS y el menú de tipos si no.
     puedoAlertar: completas.has(req.user.id),
-    // Cupo del establecimiento: diez lugares por cada botón vinculado.
+    // Cupo del establecimiento: cuánta gente cabe, con su tope.
     cupos,
     inviteCode: membresia.role === "ADMIN" ? group.inviteCode : null,
     members: group.members.map((m) => ({
@@ -257,7 +257,7 @@ router.get("/:id", userAuth, async (req, res) => {
       lastSeenAt: d.lastSeenAt,
       // Quién lo vinculó: en un coto, de qué casa es el botón.
       owner: d.owner ? { userId: d.owner.id, nombre: d.owner.displayName || d.owner.email } : null,
-      // Las dos personas que comparten el botón (el código vale dos veces).
+      // Quienes comparten el botón (el código de la caja vale tres veces).
       titulares: titularesDe.get(d.id) ?? [],
       // Su dueño y el administrador del grupo pueden desvincularlo.
       puedoDesvincular: membresia.role === "ADMIN" || d.ownerId === req.user.id,
@@ -565,11 +565,11 @@ router.patch("/:id/members/:userId", userAuth, async (req, res) => {
 // --- Botones del grupo ------------------------------------------------------
 
 // Vincula un botón a este grupo: es lo que hace que el botón le avise a esta
-// gente y lo que le suma al grupo sus diez lugares.
+// gente. No mueve el cupo del grupo, que es suyo y lo edita su administrador.
 //
 // Acepta dos caminos, porque son dos momentos distintos:
 //   - claimCode: el código impreso en la caja. Además de vincular el botón al
-//     grupo, deja a quien lo captura como titular (el código vale para dos
+//     grupo, deja a quien lo captura como titular (el código vale para tres
 //     personas). Es el camino desde la info del grupo, para quien compró el
 //     botón y lo está estrenando.
 //   - deviceId: un botón del que ya eres titular, p. ej. porque capturaste el
@@ -587,7 +587,7 @@ router.post("/:id/devices/claim", userAuth, async (req, res) => {
 
   let device;
   if (esTexto(claimCode)) {
-    // Lanza ErrorDeAcceso si el código no sirve o ya se usó dos veces. Que la
+    // Lanza ErrorDeAcceso si el código no sirve o ya se usó tres veces. Que la
     // cuenta YA sea titular no es error aquí: lo que se está pidiendo es
     // meter el botón a este grupo, y para eso justamente hay que ser dueño.
     ({ device } = await volverseTitular({

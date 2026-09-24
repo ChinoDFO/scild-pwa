@@ -64,9 +64,9 @@ export async function cuentasCompletas(userIds) {
 // Vincula una cuenta a un botón con el código impreso en su caja. Es lo que
 // se pide al crear la cuenta y lo que ofrece el apartado de Códigos.
 //
-// El tope de dos titulares se cuida DESPUÉS de insertar, dentro de la misma
+// El tope de titulares se cuida DESPUÉS de insertar, dentro de la misma
 // transacción: contar antes deja pasar dos códigos que llegan al mismo
-// tiempo, y "máximo dos filas por botón" no es algo que Postgres pueda
+// tiempo, y "máximo tres filas por botón" no es algo que Postgres pueda
 // garantizar con un índice.
 // `siYaEraTitular` decide qué pasa cuando la cuenta YA es titular del botón:
 //
