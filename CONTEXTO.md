@@ -164,33 +164,43 @@ faltan el ESP32 físico real y tener todo publicado con HTTPS (ver roadmap).
 - **Acceso de la cuenta (`src/acceso.js`) y cupos (`src/cupos.js`)** — el
   sistema de discriminación entre quien tiene botón y quien no:
   - Una cuenta es **completa** (puede disparar alertas) si es **titular**
-    de un botón o si un titular le regaló uno de los accesos que compró.
-    Cualquier otra es **invitada**: lee y escribe en el chat de sus grupos,
-    pero no dispara alertas de ningún tipo.
+    de un botón, o sea si validó el código impreso en su caja. No hay otra
+    forma: el permiso no se presta, no se regala y no se compra. Cualquier
+    otra es **invitada**: lee y escribe en el chat de sus grupos, pero no
+    dispara alertas de ningún tipo.
   - El permiso vive en la **cuenta, no en el grupo**: se tiene en todos sus
     grupos o en ninguno. Es lo que hace funcionar el caso comunitario (en
     un coto con varios botones cada quien avisa de lo suyo y todos se
     enteran) sin que un vecino tenga que habilitar a otro a mano.
-  - **Dos titulares por botón**: el `claimCode` impreso en la caja se
-    valida **dos veces** (`DeviceHolder`, tope en `TITULARES_POR_BOTON`).
-    Un botón es de la casa, no de una persona. El tope se comprueba
-    *después* de insertar, dentro de la transacción: contar antes deja
-    pasar dos códigos simultáneos, y no hay índice que exprese "máximo dos
-    filas por deviceId".
-  - **Cupos**: cada botón vinculado da lugar para **10 personas** en el
-    grupo (`LUGARES_POR_BOTON`). `GroupMember.seatDeviceId` dice de qué
-    botón sale cada lugar; `POST /api/groups/join` responde 409 cuando ya
-    no hay. Para crecer, alguien más tiene que unirse con su botón.
-    El lugar se le carga al botón con espacio más antiguo, no a quien
-    invitó: el código de invitación es uno solo por grupo y no dice quién
-    lo compartió. Al desvincular un botón sus miembros **no** salen del
-    grupo, se quedan "sin respaldo" hasta que entre otro botón.
-  - Ser titular es la **única** forma de tener funciones completas: al
-    quitarse el sistema de pagos se fueron con él los accesos comprados,
-    así que un grupo con un botón queda en 2 completas + 8 invitados y no
-    hay manera de mover ese reparto (ver la decisión pendiente del roadmap).
-    Ojo con no confundir los dos números: los **lugares** dicen cuánta gente
-    cabe en el grupo, los **titulares** quién puede disparar alertas.
+  - **Tres titulares por botón**: el `claimCode` impreso en la caja se
+    valida **tres veces** (`DeviceHolder`, tope en `TITULARES_POR_BOTON`).
+    Un botón es de la casa, no de una persona: lo comparten quienes viven o
+    trabajan ahí. El tope se comprueba *después* de insertar, dentro de la
+    transacción: contar antes deja pasar dos códigos simultáneos, y no hay
+    índice que exprese "máximo tres filas por deviceId".
+  - **Cupo del grupo** (`src/cupos.js`): cuánta gente cabe lo guarda
+    `Group.maxMembers` (nace en 10) y lo edita el ADMIN del grupo con
+    `PATCH /api/groups/:id` `{ maxMembers }`, hasta `MAX_MIEMBROS_POR_GRUPO`
+    (50). No se puede bajar por debajo de los que ya están dentro: por
+    editar un número no se saca a nadie. `POST /api/groups/join` responde
+    409 con el conteo exacto cuando está lleno, y `exigirLugar` va dentro
+    de la transacción que crea la membresía para que dos personas con el
+    mismo código no se pasen del cupo.
+    Antes el cupo salía de los botones —cada uno daba diez lugares y cada
+    membresía apuntaba al que pagaba el suyo (`seatDeviceId`)—, pero eso
+    ataba el tamaño del grupo a cuántos aparatos había dentro, que son dos
+    cosas sin relación: un coto con un botón puede necesitar veinte vecinos
+    enterados. Vincular o desvincular un botón ya no mueve el cupo.
+  - **Crear un grupo pide tener un botón**: `POST /api/groups` responde 403
+    a una cuenta invitada — un grupo donde nadie puede disparar una alerta
+    es un chat, no un sistema de emergencia. Con `vincularBoton: true` (y
+    opcionalmente `deviceId`) engancha de una vez uno de sus botones, sin
+    pedir el código otra vez: ya demostró ser titular.
+  - Ser titular es la **única** forma de tener funciones completas, así que
+    un grupo con un botón tiene 3 cuentas que pueden alertar y el resto
+    entra como invitado. Ojo con no confundir los dos números: el **cupo**
+    dice cuánta gente cabe en el grupo, los **titulares** quién puede
+    disparar alertas.
   - Endpoints en `src/routes/acceso.js`: `GET /api/acceso` (lo que pinta el
     apartado de Códigos, con el monitoreo del botón) y
     `POST /api/acceso/vincular` `{ claimCode }`.
@@ -199,8 +209,8 @@ faltan el ESP32 físico real y tener todo publicado con HTTPS (ver roadmap).
     un botón del que ya eres titular). Solo un titular puede vincularlo:
     es decidir a quién le avisa.
 - **Panel de administración (`src/routes/admin.js`)** — `GET /api/admin/clientes`:
-  un renglón por botón registrado, con quien lo dio de alta, quién lo
-  comparte y cuánto de su cupo se usa. `User.isPlatformAdmin` se prende **a
+  un renglón por botón registrado, con quien lo dio de alta, con quién lo
+  comparte y cuántos de sus tres titulares se usaron. `User.isPlatformAdmin` se prende **a
   mano en la base**; no hay endpoint que lo otorgue a propósito, sería el
   camino más corto para que una cuenta comprometida se regale todo.
 - **Tiempo real (`src/realtime.js`, Socket.IO en el mismo puerto que la
@@ -283,8 +293,25 @@ Proyecto nuevo: React + TypeScript + Vite + Tailwind v4 + React Router.
   que también permite cambiarlo).
 - `AuthContext.tsx` — sesión global (`onAuthStateChanged`).
 - `RutaProtegida.tsx` — redirige a `/login` si no hay sesión.
-- `Inicio.tsx` — pantalla protegida que llama a `GET /api/auth/me` para
-  mostrar el perfil ya sincronizado con el backend.
+- `Grupos.tsx` — la pantalla de entrada ("SCILD CONTROL"): llama a
+  `GET /api/auth/me`, lista los grupos con sus mensajes sin leer y abre
+  "Crear o unirse a un grupo". La primera vez que entra una cuenta se abre
+  sola la guía de bienvenida (`components/GuiaBienvenida.tsx`), que después
+  queda en Ayuda. (La vieja `Inicio.tsx` se borró: no tenía ruta.)
+- `components/Pantalla.tsx` + `components/BarraInferior.tsx` — el armazón
+  que comparten las pantallas: título en mayúsculas, acción redonda a la
+  derecha y la barra de 5 pestañas abajo. **El centro de la barra no es una
+  pestaña: es el botón de emergencia.** Se mantiene presionado 1 segundo
+  (un anillo amarillo se va llenando) y manda una alerta `GENERAL`, sin
+  menú ni confirmación; el segundo evita que un roce en la bolsa despierte
+  a todo el grupo (`MANTENER_MS`). Quien dispara la alerta es un
+  `setTimeout`, no la animación: el navegador pausa
+  `requestAnimationFrame` si la página no está visible. Funciona con
+  teclado (mantener Espacio/Enter) y vibra al empezar y al enviar. A quién
+  le llega: al grupo que esté abierto; si solo hay uno, a ese; si hay
+  varios, pregunta cuál — mandar el aviso a la casa equivocada es peor que
+  tardar un toque más. Una cuenta invitada lo ve apagado y, al tocarlo,
+  explica que primero hay que capturar el código de la caja.
 - `services/api.ts` — cliente que adjunta el ID token de Firebase en cada
   llamada al backend.
 - `services/notificaciones.ts` + `components/Notificaciones.tsx` — pide el
@@ -311,13 +338,13 @@ Proyecto nuevo: React + TypeScript + Vite + Tailwind v4 + React Router.
   sería tarde.
 - `pages/Codigos.tsx` — apartado de **Códigos**: el estado de la cuenta
   (completa o invitada), el campo para capturar el código de la caja
-  ("Confirmar") y los botones de los que eres titular, con sus dos
-  titulares y el monitoreo. El código también se pide, opcional, en
+  ("Confirmar") y los botones de los que eres titular, con sus titulares
+  (hasta tres) y el monitoreo. El código también se pide, opcional, en
   `pages/Registro.tsx`: si falla ahí, la cuenta **no** se deshace y se
   manda a Códigos con el motivo.
 - `pages/Admin.tsx` — panel de los administradores de la plataforma: la
   lista de clientes (un renglón por botón registrado, con quien lo dio de
-  alta y su cupo). Va dentro de la PWA y no en `SCILD-web` para no duplicar
+  alta, con quién lo comparte y cuántos de los tres titulares usó). Va dentro de la PWA y no en `SCILD-web` para no duplicar
   sesión, cliente de API y estilos: es una ruta más, que solo abre quien
   tiene `isPlatformAdmin` (el backend responde 403 a cualquier otro).
 - `pages/Ayuda.tsx` + `src/data/ayuda.ts` — apartado de Ayuda con preguntas
@@ -327,23 +354,22 @@ Proyecto nuevo: React + TypeScript + Vite + Tailwind v4 + React Router.
   falta escribirla, y `CONTACTO` es donde van el teléfono y el correo de
   soporte cuando se definan.
 - `pages/Grupo.tsx` — **una sola pantalla al estilo de una app de
-  mensajería** (parecida a WhatsApp en la forma de usarse, pero con
-  colores, fondo e íconos propios: encabezado oscuro, rojo SCILD, burbujas
-  rosadas, patrón de escudos/campanas/casas):
+  mensajería** (parecida a WhatsApp en la forma de usarse), con el mismo
+  lenguaje que el resto de la app: variables del tema, trazo grueso,
+  títulos en mayúsculas, burbujas crema del diseño y un patrón muy tenue de
+  escudos/campanas/casas. Antes era la única pantalla con colores fijos
+  (grises y rojos de Tailwind) y no cambiaba con el modo oscuro.
   - **Encabezado**: nombre del grupo y sus miembros ("Tú, Papá, Luis"). Si
     se cae la conexión en tiempo real dice "Conectando…". Al tocarlo se abre
     la info del grupo (`components/InfoGrupo.tsx`: establecimiento editable
     por el ADMIN, Google Maps, botones, miembros y código de invitación).
-  - **Botón SOS** (`components/BotonPanico.tsx`): círculo rojo grande justo
-    debajo del encabezado. Se **mantiene presionado 1 segundo** (un anillo
-    se va llenando) y manda una alerta `GENERAL` al instante, sin menú ni
-    confirmación. El segundo evita que un roce accidental despierte a todo
-    el grupo; se cambia en `MANTENER_MS`. Quien dispara la alerta es un
-    `setTimeout`, no la animación: el navegador pausa
-    `requestAnimationFrame` si la página no está visible. Funciona también
-    con teclado (mantener Espacio/Enter) y vibra al empezar y al enviar.
-  - **Alertas abiertas fijas** debajo del SOS, con "Ya voy" y "Resuelta",
-    para atenderlas sin buscarlas.
+  - **El SOS ya no vive aquí**: era un círculo rojo enorme debajo del
+    encabezado que se comía media pantalla y obligaba a entrar al grupo
+    para pedir ayuda. Ahora es el círculo oscuro del centro de la barra de
+    abajo (`components/BotonPanico.tsx` dentro de `BarraInferior`), a la
+    mano en todas las pantallas.
+  - **Alertas abiertas fijas** arriba de la conversación, con "Ya voy" y
+    "Resuelta", para atenderlas sin buscarlas.
   - **Conversación** (`components/Conversacion.tsx`): mensajes y alertas en
     una sola línea de tiempo, agrupada por día ("Hoy", "Ayer"...) con la
     etiqueta del día fija arriba mientras se ven sus mensajes. Las alertas
@@ -351,10 +377,12 @@ Proyecto nuevo: React + TypeScript + Vite + Tailwind v4 + React Router.
     nuevo o al abrirse el teclado (salvo que estés leyendo mensajes viejos).
   - **Caja de mensaje** abajo: crece con el texto; Enter envía y
     Shift+Enter hace salto de línea. A la derecha, donde WhatsApp pone el
-    micrófono, va un botón rojo **"!"** que abre el menú "¿Qué está
+    micrófono, va un **cuadrado amarillo "!"** que abre el menú "¿Qué está
     pasando?" (`components/MenuAlertas.tsx`) con los tipos del catálogo en
     círculos; al tocar uno la alerta sale de inmediato. Si hay texto
-    escrito, ese botón cambia a "enviar".
+    escrito, ese botón cambia a "enviar". Es a propósito distinto del SOS
+    de la barra —cuadrado y amarillo contra círculo oscuro—: aquí se elige
+    QUÉ está pasando, allá se pide ayuda sin pensar.
   - La lógica vive en hooks reutilizables: `hooks/useAlertas.ts` (también
     lo usa la lista de Inicio) y `hooks/useMensajes.ts`.
   - Mientras la pantalla está abierta el chat se marca como leído y el
@@ -437,6 +465,19 @@ Proyecto nuevo: React + TypeScript + Vite + Tailwind v4 + React Router.
   tokens falsos: FCM los rechaza y el backend los borra, así que el token
   que sobrevive es justo el de quien NO debía recibir el aviso (quien trae
   el chat abierto, o el propio autor del mensaje).
+- Tres titulares y cupo del grupo (24 de septiembre): quinta prueba
+  end-to-end (35 chequeos) contra Neon y Firebase reales, con cinco cuentas
+  de prueba que se borran al final: que una cuenta sin botón no pueda crear
+  un grupo (403), que el cuarto titular del mismo código se rechace (409) y
+  en la base queden exactamente tres, que el grupo nazca en 10 con tope 50,
+  las validaciones del cupo (0, 51, 2.5, texto, y bajarlo por debajo de los
+  que ya están), el 403 al miembro que intenta moverlo, el 409 con el
+  conteo exacto al unirse a un grupo lleno, y que desvincular el botón no
+  mueva el cupo ni saque a nadie. En el navegador: el chat rediseñado en
+  claro y oscuro, el menú de tipos, la vista de un invitado (sin botón de
+  alerta y con el motivo a la vista) y el SOS de la barra — el anillo
+  avanza, soltarlo antes del segundo no manda nada, y al completarlo la
+  alerta se creó de verdad.
 - Push: alertas reales con `npm run alert:test`, recibidas en Chrome con la
   app abierta y cerrada.
 - PWA: build de producción con `vite preview` → un solo SW activo en `/`,
@@ -542,15 +583,27 @@ iOS, no solo por comodidad).
 Ya hecho: alerta manual, pantallas de grupos, atender/resolver alertas,
 PWA instalable con push funcionando, chat del grupo en tiempo real, tipos
 de alerta, apodos, edición del grupo por el admin, dirección obligatoria,
-vinculación de botones con el código de la caja, acceso por cuenta, cupos
-por botón, panel de administración, ver/recuperar la contraseña y eliminar
-la cuenta.
+vinculación de botones con el código de la caja, acceso por cuenta, cupo
+del grupo editable, guía de bienvenida, panel de administración,
+ver/recuperar la contraseña y eliminar la cuenta.
 
 **Quitado el 22 de septiembre**: el sistema de pagos completo (solicitudes,
 chat con datos bancarios, comprobante con foto, aprobación desde el panel)
 y con él los accesos comprados (`AccessGrant`, `Device.extraAccesses`). Un
-botón da funciones completas a sus dos titulares y ya; no hay nada que
+botón da funciones completas a sus titulares y ya; no hay nada que
 comprar. Está en el historial de git si alguna vez hace falta revivirlo.
+
+**Cambiado el 24 de septiembre**: el botón SOS salió del chat y se volvió
+el círculo oscuro de la barra de abajo, así que se pide ayuda desde
+cualquier pantalla sin entrar al grupo; el chat se rehízo con el lenguaje
+visual del resto de la app (variables del tema, trazo grueso, burbujas
+crema) y el menú de alertas por tipo quedó como un cuadrado amarillo, a
+propósito distinto del SOS. Ese mismo día se arreglaron tres cosas que
+quedaron a medias al pasar a tres titulares y al cupo del grupo: el panel
+de clientes tronaba (pedía el `seats` que ya no existe en el schema),
+`npm run pruebas:preparar` no arrancaba (importaba `LUGARES_POR_BOTON`) y
+la Ayuda seguía explicando el sistema viejo (dos titulares, diez lugares
+por botón).
 En orden sugerido:
 
 1. **Publicar con HTTPS (deploy).** Es lo que desbloquea todo lo demás: sin
@@ -614,15 +667,17 @@ En orden sugerido:
    - Nota opcional al enviar una alerta ("camioneta gris, placas…").
    - Apodo por grupo (hoy es uno por persona para todos sus grupos).
 
-11. **Decisión pendiente, ahora más urgente: cuántas cuentas completas
-   trae un grupo.** La especificación del producto dice que de las 10
-   personas, 7 tengan funciones completas y 3 sean invitados. Lo
-   implementado son 2 (los titulares) y 8 invitados. Antes la diferencia
-   se cerraba pagando; al quitarse los pagos **ya no hay forma de llegar a
-   7**, así que o se acepta que un grupo tenga dos cuentas capaces de
-   alertar, o hay que decidir otro mecanismo (que el titular reparta N
-   accesos sin cobrar, que el código valga más veces, o que todo miembro
-   sea completo). Hoy el código no ofrece ninguno.
+11. **Decisión pendiente: cuántas cuentas completas trae un grupo.** La
+   especificación del producto dice que de las 10 personas, 7 tengan
+   funciones completas y 3 sean invitados. Lo implementado son 3 (los
+   titulares del botón) y el resto invitados, con el cupo del grupo ya
+   desatado de los botones (lo mueve su administrador hasta 50). Antes la
+   diferencia se cerraba pagando; al quitarse los pagos **no hay forma de
+   llegar a 7**, así que o se acepta que un grupo tenga tres cuentas
+   capaces de alertar, o hay que decidir otro mecanismo (que el código
+   valga más veces, o que todo miembro sea completo). Subir
+   `TITULARES_POR_BOTON` es una línea, pero es decisión de producto: cada
+   titular más es alguien que puede despertar a todo el grupo.
 
 ## 7. Notas de seguridad para quien se una
 
