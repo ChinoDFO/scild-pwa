@@ -110,6 +110,11 @@ model GroupMember {
   // mensajes trae sin leer y si el aviso push dice el mensaje o
   // "3 mensajes nuevos".
   lastReadAt   DateTime @default(now())
+  // Grupo fijado arriba en la lista. Es de cada quien, no del grupo: el
+  // vecino que atiende el coto quiere ese chat siempre a la mano, y a los
+  // demás no se les mueve nada. Guarda CUÁNDO se fijó para poder ordenar
+  // entre varios fijados (el último que se fija queda hasta arriba).
+  pinnedAt     DateTime?
 
   user       User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   group      Group   @relation(fields: [groupId], references: [id], onDelete: Cascade)
@@ -143,6 +148,17 @@ model Device {
   batteryLevel      Int?
   lastSeenAt        DateTime?
   heartbeatInterval Int          @default(60)
+  // Telemetría del último heartbeat. Es lo que la app enseña en la pantalla
+  // del botón (red activa, IP, señal, fallos) y lo que permite distinguir
+  // "no llega señal" de "llega pero con el WiFi en las últimas". Se guarda el
+  // último valor en Device —es lo que se consulta— y el histórico crudo
+  // queda en DeviceEvent.
+  ipAddress         String?
+  ssid              String?
+  // dBm: -55 o mejor es excelente, -70 aceptable, por debajo es débil.
+  rssi              Int?
+  // Cuántas veces seguidas el aparato se quedó sin internet teniendo WiFi.
+  internetFailures  Int          @default(0)
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
 
@@ -200,6 +216,13 @@ model DeviceEvent {
   @@index([deviceId, createdAt])
 }
 
+// Ajustes que la app le manda al botón sin tocar el aparato. El ESP32 los
+// baja en la respuesta del heartbeat y los guarda en su memoria (Preferences),
+// así que sobreviven a un reinicio aunque se quede sin internet.
+//
+// Llave/valor y no columnas: el firmware gana ajustes con el tiempo y cada
+// uno no puede costar una migración. Las que entiende el firmware v8 están
+// listadas en src/configuracionBoton.js.
 model DeviceConfiguration {
   id        String   @id @default(uuid())
   deviceId  String

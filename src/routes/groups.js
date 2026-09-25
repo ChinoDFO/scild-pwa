@@ -422,6 +422,27 @@ router.post("/:id/read", userAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
+// Fijar el grupo arriba de la lista, o soltarlo. Lo puede hacer cualquier
+// miembro y no le cambia la lista a nadie más: el pin vive en la membresía,
+// no en el grupo. Volver a fijar uno ya fijado refresca la fecha, así que
+// pasa al principio de los fijados.
+router.patch("/:id/pin", userAuth, async (req, res) => {
+  const { fijado } = req.body ?? {};
+  if (typeof fijado !== "boolean") {
+    return res.status(400).json({ error: "Falta decir si el grupo queda fijado" });
+  }
+
+  const { count } = await prisma.groupMember.updateMany({
+    where: { userId: req.user.id, groupId: req.params.id },
+    data: { pinnedAt: fijado ? new Date() : null },
+  });
+  if (count === 0) {
+    return res.status(404).json({ error: "Grupo no encontrado" });
+  }
+
+  res.json({ fijado });
+});
+
 // --- Salir del grupo, eliminarlo y nombrar administrador --------------------
 
 // Cualquiera puede salirse. Dos casos que hay que cuidar:

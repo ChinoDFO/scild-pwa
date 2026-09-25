@@ -3,6 +3,7 @@ import prisma from "../prisma.js";
 import { deviceAuth } from "../middleware/deviceAuth.js";
 import { crearNotificacionesPendientes, enviarPushDeAlerta } from "../push.js";
 import { emitirAGrupo } from "../realtime.js";
+import { configuracionParaElBoton } from "../configuracionBoton.js";
 
 const router = Router();
 
@@ -11,9 +12,41 @@ const router = Router();
 // ausencia de heartbeat, nunca porque el propio dispositivo lo declare.
 const AUTO_REPORTABLE_STATUSES = new Set(["ONLINE", "MAINTENANCE"]);
 
+// Lo que el ESP32 reporta de sí mismo en cada heartbeat. Se filtra campo por
+// campo: lo que manda el aparato entra directo a la base y un valor raro
+// (una IP de 10 KB, un RSSI de texto) no debe poder guardarse.
+//
+// Los nombres de fuera son los que ya usaba el firmware —redActiva,
+// fallosInternet— para no tener que cambiar el aparato y el servidor a la vez.
+function telemetriaDe(body) {
+  const { batteryLevel, firmwareVersion, ip, redActiva, rssi, fallosInternet } = body ?? {};
+  const data = {};
+
+  if (typeof batteryLevel === "number") data.batteryLevel = batteryLevel;
+  if (typeof firmwareVersion === "string") data.firmwareVersion = firmwareVersion.slice(0, 20);
+  if (typeof ip === "string") data.ipAddress = ip.slice(0, 45);
+  if (typeof redActiva === "string") data.ssid = redActiva.slice(0, 32);
+  if (typeof rssi === "number" && Number.isFinite(rssi)) data.rssi = Math.trunc(rssi);
+  if (typeof fallosInternet === "number" && fallosInternet >= 0) {
+    data.internetFailures = Math.trunc(fallosInternet);
+  }
+
+  return data;
+}
+
+// El aparato manda la versión de configuración que ya tiene aplicada. Si es
+// la misma que hay en el servidor se le contesta `config: null` y se ahorra
+// el JSON entero (que incluye la contraseña de la red de respaldo); si
+// cambió, se le manda completa para que la guarde en su memoria.
+async function configuracionPendiente(deviceId, configVersion) {
+  const config = await configuracionParaElBoton(deviceId);
+  if (!config) return null;
+  return config.version === Number(configVersion) ? null : config;
+}
+
 router.post("/heartbeat", deviceAuth, async (req, res) => {
   const device = req.device;
-  const { batteryLevel, firmwareVersion } = req.body ?? {};
+  const telemetria = telemetriaDe(req.body);
 
   await prisma.$transaction([
     prisma.device.update({
@@ -21,21 +54,36 @@ router.post("/heartbeat", deviceAuth, async (req, res) => {
       data: {
         lastSeenAt: new Date(),
         status: device.status === "EMERGENCY" ? "EMERGENCY" : "ONLINE",
-        ...(typeof batteryLevel === "number" ? { batteryLevel } : {}),
-        ...(typeof firmwareVersion === "string" ? { firmwareVersion } : {}),
+        ...telemetria,
       },
     }),
     prisma.deviceEvent.create({
       data: {
         deviceId: device.id,
         type: "HEARTBEAT",
-        payload: { batteryLevel, firmwareVersion },
+        payload: telemetria,
       },
     }),
   ]);
 
-  res.status(200).json({ ok: true });
+  // La respuesta del heartbeat es el canal por el que la app configura el
+  // botón: el aparato no puede recibir conexiones de fuera (está detrás del
+  // router del cliente), así que los ajustes viajan de vuelta en el mismo
+  // viaje que ya hace cada pocos minutos.
+  res.status(200).json({
+    ok: true,
+    config: await configuracionPendiente(device.id, req.body?.configVersion),
+  });
 });
+
+// Cuántos segundos después de una alerta se considera que lo que llega es el
+// reintento de la misma y no un botonazo nuevo. Es el cooldown del propio
+// aparato (el que configura la app), con un mínimo de 15s: por debajo de eso
+// el reintento del firmware todavía anda en camino.
+async function ventanaDeReintento(deviceId) {
+  const config = await configuracionParaElBoton(deviceId);
+  return Math.max(config?.cooldownSegundos ?? 10, 15);
+}
 
 router.post("/panic", deviceAuth, async (req, res) => {
   const device = req.device;
@@ -44,6 +92,28 @@ router.post("/panic", deviceAuth, async (req, res) => {
   // avisarle. Se responde claro para que el firmware lo pueda mostrar.
   if (!device.groupId) {
     return res.status(409).json({ error: "Dispositivo sin vincular a un grupo" });
+  }
+
+  // Reintento, no segunda emergencia.
+  //
+  // El ESP32 reintenta cuando no obtiene respuesta, y desde el aparato no se
+  // distingue "no llegó" de "llegó y se perdió el acuse": sin esto, un
+  // apagón de dos segundos en medio de una alerta manda tres avisos push del
+  // mismo botonazo. Dentro de la ventana de cooldown se le devuelve la
+  // alerta que ya se creó, con el mismo alertId.
+  const ventana = await ventanaDeReintento(device.id);
+  const reciente = await prisma.alert.findFirst({
+    where: {
+      deviceId: device.id,
+      source: "DEVICE",
+      status: "ACTIVE",
+      createdAt: { gt: new Date(Date.now() - ventana * 1000) },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
+  if (reciente) {
+    return res.status(200).json({ alertId: reciente.id, createdAt: reciente.createdAt, repetida: true });
   }
 
   const alert = await prisma.$transaction(async (tx) => {
@@ -95,11 +165,10 @@ router.post("/panic", deviceAuth, async (req, res) => {
 
 router.post("/status", deviceAuth, async (req, res) => {
   const device = req.device;
-  const { batteryLevel, firmwareVersion, status } = req.body ?? {};
+  const { status } = req.body ?? {};
+  const telemetria = telemetriaDe(req.body);
 
-  const data = { lastSeenAt: new Date() };
-  if (typeof batteryLevel === "number") data.batteryLevel = batteryLevel;
-  if (typeof firmwareVersion === "string") data.firmwareVersion = firmwareVersion;
+  const data = { lastSeenAt: new Date(), ...telemetria };
   if (typeof status === "string" && AUTO_REPORTABLE_STATUSES.has(status)) {
     data.status = status;
   }
@@ -110,12 +179,15 @@ router.post("/status", deviceAuth, async (req, res) => {
       data: {
         deviceId: device.id,
         type: "STATUS_CHANGE",
-        payload: { batteryLevel, firmwareVersion, status },
+        payload: { ...telemetria, status },
       },
     }),
   ]);
 
-  res.status(200).json({ ok: true });
+  res.status(200).json({
+    ok: true,
+    config: await configuracionPendiente(device.id, req.body?.configVersion),
+  });
 });
 
 export default router;

@@ -7,6 +7,19 @@ import { emitirAGrupo } from "../realtime.js";
 
 const router = Router();
 
+// Orden de la lista de grupos, el mismo que la app vuelve a aplicar cuando
+// entra un mensaje por el socket: primero los fijados (el último que se fijó
+// arriba) y después el resto por conversación más reciente. Se hace aquí y no
+// en el ORDER BY porque el "último mensaje" sale de otra tabla.
+function ordenarGrupos(grupos) {
+  const fecha = (v) => (v ? new Date(v).getTime() : 0);
+  return grupos.sort((a, b) => {
+    if (a.fijado !== b.fijado) return a.fijado ? -1 : 1;
+    if (a.fijado && b.fijado) return fecha(b.fijadoEl) - fecha(a.fijadoEl);
+    return fecha(b.ultimoMensajeEl) - fecha(a.ultimoMensajeEl);
+  });
+}
+
 // La PWA llama esto justo después de login/registro (ya autenticado con
 // Firebase) para obtener el perfil sincronizado y a qué grupos pertenece.
 router.get("/me", userAuth, async (req, res) => {
@@ -24,6 +37,16 @@ router.get("/me", userAuth, async (req, res) => {
     )
   );
 
+  // Fecha del último mensaje de cada grupo: es lo que sube los chats vivos
+  // hasta arriba de la lista. Una sola consulta agrupada en vez de una por
+  // grupo, que ya son varias con los contadores de arriba.
+  const ultimos = await prisma.message.groupBy({
+    by: ["groupId"],
+    where: { groupId: { in: memberships.map((m) => m.groupId) } },
+    _max: { createdAt: true },
+  });
+  const ultimoPorGrupo = new Map(ultimos.map((u) => [u.groupId, u._max.createdAt]));
+
   // Si la cuenta puede alertar. La PWA esconde el botón SOS y el menú de
   // tipos cuando es false, en todos sus grupos.
   const acceso = await accesoDeCuenta(req.user.id);
@@ -39,12 +62,19 @@ router.get("/me", userAuth, async (req, res) => {
     esAdminPlataforma: req.user.isPlatformAdmin,
     // El perfil de la app muestra desde cuándo existe la cuenta.
     creadaEl: req.user.createdAt,
-    groups: memberships.map((m, i) => ({
-      id: m.group.id,
-      name: m.group.name,
-      role: m.role,
-      sinLeer: sinLeer[i],
-    })),
+    groups: ordenarGrupos(
+      memberships.map((m, i) => ({
+        id: m.group.id,
+        name: m.group.name,
+        role: m.role,
+        sinLeer: sinLeer[i],
+        fijado: m.pinnedAt !== null,
+        fijadoEl: m.pinnedAt,
+        // Sin mensajes todavía: vale la fecha en que entró, para que un grupo
+        // recién creado no se vaya hasta el fondo.
+        ultimoMensajeEl: ultimoPorGrupo.get(m.groupId) ?? m.joinedAt,
+      }))
+    ),
   });
 });
 

@@ -1,10 +1,15 @@
-// Da de alta un botón e imprime sus dos códigos. Esto es lo que se hace al
+// Da de alta un botón e imprime sus tres códigos. Esto es lo que se hace al
 // preparar el aparato, antes de venderlo:
 //
+//   - deviceCode: el número de serie que le ponemos nosotros.
 //   - deviceSecret: va en la configuración del ESP32. Se muestra UNA sola vez
 //     (en la base solo queda su hash). Si se pierde, hay que dar de alta otro.
 //   - código de vinculación: se imprime en la caja. Con él, quien compre el
 //     botón lo liga a su grupo desde la app, sin que nosotros toquemos nada.
+//
+// Lo mismo se puede hacer desde el panel de administración de la app
+// (/admin), que es lo práctico cuando no estás frente al proyecto. Los dos
+// caminos usan src/fabrica.js: los códigos se generan en un solo lugar.
 //
 // Uso:
 //   npm run device:create -- BTN-001
@@ -12,25 +17,12 @@
 
 import "dotenv/config";
 import crypto from "node:crypto";
-import bcrypt from "bcryptjs";
 import prisma from "../src/prisma.js";
-import { formatearClaimCode, generarClaimCode } from "../src/claimCode.js";
-
-function generateSecret() {
-  return crypto.randomBytes(24).toString("base64url");
-}
+import { formatearClaimCode } from "../src/claimCode.js";
+import { crearDispositivo, siguienteDeviceCode, validarDeviceCode } from "../src/fabrica.js";
 
 function generateInviteCode() {
   return crypto.randomBytes(6).toString("hex").toUpperCase();
-}
-
-// El código de la caja es único; si por casualidad se repite, se reintenta.
-async function claimCodeLibre() {
-  for (let intento = 0; intento < 5; intento++) {
-    const codigo = generarClaimCode();
-    if (!(await prisma.device.findUnique({ where: { claimCode: codigo } }))) return codigo;
-  }
-  throw new Error("No se pudo generar un código de vinculación único");
 }
 
 async function main() {
@@ -38,6 +30,13 @@ async function main() {
 
   if (!deviceCode) {
     console.error('Uso: npm run device:create -- <deviceCode> ["<grupo para pruebas>"]');
+    console.error(`El siguiente libre de la serie sería: ${await siguienteDeviceCode()}`);
+    process.exit(1);
+  }
+
+  const invalido = validarDeviceCode(deviceCode);
+  if (invalido) {
+    console.error(invalido);
     process.exit(1);
   }
 
@@ -52,19 +51,9 @@ async function main() {
     }
   }
 
-  const secret = generateSecret();
-  const secretHash = await bcrypt.hash(secret, 12);
-  const claimCode = await claimCodeLibre();
-
-  const device = await prisma.device.create({
-    data: {
-      deviceCode,
-      secretHash,
-      claimCode,
-      groupId: group?.id ?? null,
-      ownerId: null,
-      claimedAt: group ? new Date() : null,
-    },
+  const { device, secret, claimCode } = await crearDispositivo({
+    deviceCode,
+    groupId: group?.id ?? null,
   });
 
   console.log("\nBotón dado de alta. El secreto NO se volverá a mostrar:");
@@ -79,7 +68,7 @@ async function main() {
 
 main()
   .catch((e) => {
-    console.error(e);
+    console.error(e.message ?? e);
     process.exitCode = 1;
   })
   .finally(() => prisma.$disconnect());

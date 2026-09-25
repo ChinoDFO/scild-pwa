@@ -84,20 +84,56 @@ faltan el ESP32 físico real y tener todo publicado con HTTPS (ver roadmap).
   `prisma/schema.prisma`.
 - **Endpoints del ESP32** (autenticados con headers `x-device-code` /
   `x-device-secret`, comparados contra el hash guardado):
-  - `POST /api/devices/heartbeat` — reporta que sigue vivo, actualiza
-    batería/firmware/última conexión.
+  - `POST /api/devices/heartbeat` — reporta que sigue vivo y **cómo está**:
+    `redActiva`, `ip`, `rssi`, `fallosInternet`, `batteryLevel`,
+    `firmwareVersion`. Eso es lo que llena la pantalla de monitoreo del
+    botón en la app. **La respuesta trae la configuración** que se haya
+    guardado desde la app (ver `PATCH /api/acceso/botones/:id/config`): el
+    ESP32 está detrás del router del cliente y no recibe conexiones de
+    fuera, así que el heartbeat es el único momento en que se le puede
+    hablar. El aparato manda en `configVersion` la huella que ya tiene
+    aplicada; si coincide se le contesta `config: null` y no reescribe su
+    memoria flash.
   - `POST /api/devices/panic` — crea una `Alert`, pone el dispositivo en
     `EMERGENCY`, devuelve el id de la alerta creada. Un botón sin vincular
     responde 409: no tiene a quién avisarle (el heartbeat sí funciona, para
-    poder probarlo antes de venderlo).
+    poder probarlo antes de venderlo). **Los reintentos no duplican la
+    alerta**: si llega otro `/panic` del mismo botón dentro de su cooldown
+    (mínimo 15s) se devuelve `200` con el mismo `alertId` y `repetida: true`,
+    porque desde el aparato no se distingue "no llegó" de "se perdió el
+    acuse".
   - `POST /api/devices/status` — reporta estado (`ONLINE`/`MAINTENANCE`
     solamente; `EMERGENCY` solo lo dispara `/panic`, nunca el propio
-    dispositivo).
+    dispositivo). Acepta la misma telemetría y devuelve la misma
+    configuración que el heartbeat.
+- **Firmware del botón** (`firmware/boton_panico_v8/`) — el sketch de
+  Arduino que corre en el ESP32. **v8 habla solo con este backend**; la v7
+  mandaba la alerta a `ntfy.sh` y su estado a Firebase Realtime Database,
+  que eran dos servicios fuera de la app (quien recibía el aviso no era el
+  grupo, sino quien estuviera suscrito al canal de ntfy).
+  - Se identifica con `deviceCode` + `deviceSecret`, grabados de fábrica en
+    las constantes del sketch o capturados una vez en su portal; quedan en
+    `Preferences`.
+  - **El portal WiFi del aparato sigue existiendo pero solo para la red
+    principal**: mientras el botón no tenga internet no puede recibir nada
+    del servidor. Todo lo demás (nombre, cooldown, cada cuánto reportarse,
+    red de respaldo) se manda desde la app y baja en el heartbeat.
+  - Reintenta una alerta hasta 5 veces, pero **solo mientras el servidor no
+    conteste**: un 201 o un 200 ya significa que el botonazo quedó
+    registrado.
+  - `npm run boton:simular -- --code BTN-PRUEBA-01 --secret <secreto>`
+    hace lo mismo que el aparato, desde la compu: sirve para probar la
+    cadena completa sin hardware (`--panic` dispara una alerta, `--cada 30`
+    se queda mandando heartbeats).
 - **Endpoints de usuario** (autenticados con `Authorization: Bearer
   <idToken>` de Firebase):
   - `GET /api/auth/me` — perfil + grupos del usuario (se autocrea en
     Postgres la primera vez que llega un token válido). Cada grupo trae
-    `sinLeer`: cuántos mensajes del chat no ha visto.
+    `sinLeer` (cuántos mensajes del chat no ha visto), `fijado`/`fijadoEl`
+    y `ultimoMensajeEl`. **La lista viene ordenada**: primero los grupos
+    fijados (el último que se fijó arriba) y después los demás por
+    conversación más reciente; sin mensajes todavía cuenta la fecha en que
+    entró al grupo.
   - `PATCH /api/auth/me` `{ displayName }` — el **apodo** con el que los
     demás ven a la persona ("Mamá", "Cajero"); máx. 40 caracteres. Sale en
     el chat, en la lista de miembros y en el push de sus alertas.
@@ -133,6 +169,22 @@ faltan el ESP32 físico real y tener todo publicado con HTTPS (ver roadmap).
   - `POST /api/groups/:id/read` — marca el chat como leído hasta ahora.
     Pone en cero el contador de `GET /api/auth/me` y hace que el siguiente
     aviso push traiga el mensaje en vez de "N mensajes nuevos".
+  - `GET /api/acceso/botones/:id/config` y
+    `PATCH /api/acceso/botones/:id/config` — **la configuración del botón
+    que antes se hacía en su portal WiFi**. Solo un TITULAR del botón (404
+    si no lo es, exista o no). Se pueden mandar `nombre` (del aparato),
+    `heartbeatSegundos` (30–3600), `cooldownSegundos` (5–300),
+    `ssidRespaldo` y `passRespaldo`. Los dos primeros viven en `Device`
+    —el servidor los usa— y el resto en `DeviceConfiguration` (llave/valor,
+    para que un ajuste nuevo no cueste una migración). La contraseña de la
+    red de respaldo **entra pero no sale**: el GET solo dice
+    `passRespaldoPuesta`. La red **principal** no se puede mandar por aquí:
+    para recibirla el botón ya tendría que estar conectado.
+  - `PATCH /api/groups/:id/pin` `{ fijado }` — fija el grupo arriba de la
+    lista o lo suelta. Lo puede hacer cualquier miembro y **no le cambia la
+    lista a nadie más**: el pin vive en `GroupMember.pinnedAt`, no en el
+    grupo. Volver a fijar uno ya fijado refresca la fecha, así que pasa al
+    principio de los fijados.
   - `GET /api/groups/:id/messages` (`?antesDe=<fecha ISO>` para paginar de
     50 en 50) y `POST /api/groups/:id/messages` `{ content }` — **chat del
     grupo** (máx. 1000 caracteres). Cada mensaje nuevo se reparte al
@@ -208,11 +260,24 @@ faltan el ESP32 físico real y tener todo publicado con HTTPS (ver roadmap).
     titular **y** vincula el botón al grupo) o `deviceId` (traes al grupo
     un botón del que ya eres titular). Solo un titular puede vincularlo:
     es decidir a quién le avisa.
-- **Panel de administración (`src/routes/admin.js`)** — `GET /api/admin/clientes`:
-  un renglón por botón registrado, con quien lo dio de alta, con quién lo
-  comparte y cuántos de sus tres titulares se usaron. `User.isPlatformAdmin` se prende **a
-  mano en la base**; no hay endpoint que lo otorgue a propósito, sería el
-  camino más corto para que una cuenta comprometida se regale todo.
+- **Panel de administración (`src/routes/admin.js`)**:
+  - `GET /api/admin/clientes` — un renglón por botón registrado, con quien
+    lo dio de alta, con quién lo comparte y cuántos de sus tres titulares se
+    usaron.
+  - `GET /api/admin/dispositivos` — el **inventario**: botones dados de alta
+    que todavía no tiene nadie, con el código impreso en su caja (por si hay
+    que reimprimir la etiqueta) y `siguienteCodigo`, el siguiente libre de
+    la serie `BTN-###`.
+  - `POST /api/admin/dispositivos` `{ deviceCode, nombre? }` — **da de alta
+    un botón** (el paso de fábrica) y devuelve sus tres códigos. El
+    `deviceSecret` viaja al navegador **una sola vez, aquí**: en la base
+    solo queda su hash y ninguna otra consulta lo puede recuperar. Es lo
+    mismo que hace `npm run device:create`, y los dos caminos comparten
+    `src/fabrica.js` para que los códigos se generen en un solo lugar.
+
+  `User.isPlatformAdmin` se prende **a mano en la base**; no hay endpoint
+  que lo otorgue a propósito, sería el camino más corto para que una cuenta
+  comprometida se regale todo.
 - **Tiempo real (`src/realtime.js`, Socket.IO en el mismo puerto que la
   API)**: el socket se autentica con el mismo ID token de Firebase y entra
   solo a las salas de los grupos del usuario (nadie escucha un grupo
@@ -270,9 +335,12 @@ faltan el ESP32 físico real y tener todo publicado con HTTPS (ver roadmap).
     cualquier puerto. Antes solo pasaba el 5173, y cuando Vite se brincaba
     solo al 5174 (porque el 5173 estaba ocupado) todo fallaba con CORS.
 - `scripts/createDevice.js` (`npm run device:create -- BTN-001`) — da de
-  alta un botón e imprime sus dos códigos: el `deviceSecret` (va en el
-  ESP32, se muestra **una sola vez**) y el código de vinculación que se
-  imprime en la caja. Pasándole además un nombre de grupo lo deja vinculado
+  alta un botón e imprime sus tres códigos: el `deviceCode` (el número de
+  serie), el `deviceSecret` (va en el ESP32, se muestra **una sola vez**) y
+  el código de vinculación que se imprime en la caja. Lo mismo se puede
+  hacer desde el panel de administración de la app, que es lo práctico
+  cuando no se está frente al proyecto; la lógica es la misma
+  (`src/fabrica.js`). Pasándole además un nombre de grupo lo deja vinculado
   de una vez, solo para pruebas. El formato del código de caja está en
   `src/claimCode.js`: 9 caracteres sin letras que se confundan (sin I, L,
   O, 0 ni 1), mostrados como ABC-DEF-GHJ, y al capturarlo se aceptan
@@ -295,7 +363,12 @@ Proyecto nuevo: React + TypeScript + Vite + Tailwind v4 + React Router.
 - `RutaProtegida.tsx` — redirige a `/login` si no hay sesión.
 - `Grupos.tsx` — la pantalla de entrada ("SCILD CONTROL"): llama a
   `GET /api/auth/me`, lista los grupos con sus mensajes sin leer y abre
-  "Crear o unirse a un grupo". La primera vez que entra una cuenta se abre
+  "Crear o unirse a un grupo". El orden es el de cualquier app de mensajes
+  —fijados arriba, luego el de conversación más reciente— y la chincheta de
+  cada fila lo fija o lo suelta (`PATCH /api/groups/:id/pin`, optimista). La
+  lista se reacomoda sola cuando entra un `mensaje:nuevo` por el socket, sin
+  volver a pedir el perfil: por eso el mismo orden está escrito en las dos
+  partes. La primera vez que entra una cuenta se abre
   sola la guía de bienvenida (`components/GuiaBienvenida.tsx`), que después
   queda en Ayuda. (La vieja `Inicio.tsx` se borró: no tenía ruta.)
 - `components/Pantalla.tsx` + `components/BarraInferior.tsx` — el armazón
@@ -627,9 +700,11 @@ En orden sugerido:
    Falta lo que se decida para **grupos de comunidad** (punto 8) y poder
    **rotar el código de la caja** si se filtra (hoy solo se puede cambiar
    a mano en la base).
-3. **Firmware real del ESP32** — que llame a `/api/devices/heartbeat`,
-   `/panic` y `/status` con sus credenciales (necesita el backend
-   publicado, punto 1).
+3. ~~Firmware real del ESP32~~ ✅ `firmware/boton_panico_v8/` — llama a
+   `/api/devices/panic` y `/api/devices/heartbeat` con su
+   `deviceCode`/`deviceSecret`. Falta **probarlo en el aparato**: hasta hoy
+   solo se ha probado con `npm run boton:simular` (ver abajo) y necesita el
+   backend publicado con HTTPS (punto 1) para poder salir del laboratorio.
 4. **Página-tutorial de instalación en `scild-web`** — nueva opción junto
    a "Gestionar pedidos" que explique cómo instalar esta PWA (necesita la
    URL publicada, punto 1).
@@ -638,8 +713,10 @@ En orden sugerido:
      solo se intenta una vez).
    - Avisar cuando un botón pasa a `OFFLINE`: un botón apagado es un riesgo
      silencioso, nadie se entera hasta que se necesita.
-6. **Pantallas de dispositivos** — ya se ve estado/última señal/batería;
-   falta historial (`DeviceEvent`) y configuración básica.
+6. **Pantallas de dispositivos** — ya se ve el resumen de la flota,
+   estado, última señal, red, IP, señal WiFi, fallos, última alerta y la
+   configuración del aparato. Falta el **historial** (`DeviceEvent`, que ya
+   se guarda pero no se enseña).
 7. **Ubicación** — ya hay enlace a Google Maps con la dirección; falta
    capturar coordenadas y editar la dirección después de crear el grupo.
 8. **Grupos de comunidad (cotos, fraccionamientos)** — un coto donde cada
@@ -683,6 +760,14 @@ En orden sugerido:
 
 - Nunca subir `.env` ni `firebase-service-account.json` a git (ya están en
   `.gitignore`, pero revisa antes de un `git add -A`).
+- La **contraseña de la red de respaldo** que se manda desde la app se
+  guarda en `DeviceConfiguration` en texto plano: el botón necesita
+  recibirla tal cual para poder conectarse. Es una decisión tomada a
+  sabiendas (la alternativa era dejar ese ajuste solo en el portal del
+  aparato). Implica que un volcado de la base expone contraseñas de WiFi de
+  clientes: no se devuelve nunca por la API (el GET solo dice si está
+  puesta) y, si algún día se cifra, la llave tiene que vivir fuera de la
+  base.
 - El `deviceSecret` que imprime `createDevice.js` solo se muestra una vez
   — si se pierde, hay que rotar el dispositivo (crear uno nuevo), no se
   puede recuperar el valor original.
