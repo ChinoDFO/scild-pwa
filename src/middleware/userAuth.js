@@ -16,6 +16,37 @@ export class CorreoYaRegistrado extends Error {
   }
 }
 
+// Cuando el token es de una cuenta que ya se borró de Firebase.
+export class CuentaEliminada extends Error {
+  constructor() {
+    super("Esa cuenta ya no existe. Inicia sesión otra vez o regístrate de nuevo.");
+    this.status = 401;
+  }
+}
+
+// Antes de CREAR la fila de alguien, comprueba que su cuenta de Firebase
+// sigue existiendo.
+//
+// Un ID token sigue siendo válido hasta una hora después de que la cuenta se
+// borra: verifyIdToken solo revisa la firma y la fecha, no si la persona
+// existe. Así que cualquier petición que la app ya tenía en camino al
+// eliminar la cuenta (el socket reconectando, el perfil, las notificaciones)
+// llegaba con un token todavía "bueno" y VOLVÍA A CREAR la fila recién
+// borrada, apuntando a un uid que ya no existe en Firebase. Cuando la persona
+// se registraba de nuevo con el mismo correo, Firebase le daba un uid nuevo y
+// chocaba con esa fila fantasma: el "ese correo ya tiene datos" de arriba.
+//
+// Solo se pregunta cuando la fila NO existe (la primera vez de cada cuenta),
+// para no sumar una llamada a Firebase en cada petición.
+async function exigirCuentaViva(uid) {
+  try {
+    await firebaseAuth.getUser(uid);
+  } catch (e) {
+    if (e?.code === "auth/user-not-found") throw new CuentaEliminada();
+    throw e;
+  }
+}
+
 // Crea/actualiza la fila de Postgres del usuario de Firebase la primera vez
 // que le habla al backend.
 //
@@ -33,6 +64,12 @@ export class CorreoYaRegistrado extends Error {
 // reconecta a mano, con `npm run cuenta:revincular`, cuando se confirma que
 // es la misma persona.
 async function sincronizarUsuario(decoded) {
+  const yaTieneFila = await prisma.user.findUnique({
+    where: { firebaseUid: decoded.uid },
+    select: { id: true },
+  });
+  if (!yaTieneFila) await exigirCuentaViva(decoded.uid);
+
   try {
     return await prisma.user.upsert({
       where: { firebaseUid: decoded.uid },
@@ -87,6 +124,9 @@ export async function userAuth(req, res, next) {
   } catch (e) {
     if (e instanceof CorreoYaRegistrado) {
       return res.status(409).json({ error: e.message });
+    }
+    if (e instanceof CuentaEliminada) {
+      return res.status(401).json({ error: e.message });
     }
     throw e;
   }

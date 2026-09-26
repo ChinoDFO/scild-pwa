@@ -13,7 +13,9 @@
     "prisma:studio": "prisma studio",
     "cuenta:revincular": "node scripts/revincularCuenta.js",
     "pruebas:preparar": "node scripts/prepararPruebas.js",
-    "boton:simular": "node scripts/simularBoton.js"
+    "boton:simular": "node scripts/simularBoton.js",
+    "grupos:limpiar": "node scripts/limpiarGruposVacios.js",
+    "cuentas:wipe": "node scripts/wipeCuentas.js"
   },
   "dependencies": {
     "@prisma/client": "^6.4.0",

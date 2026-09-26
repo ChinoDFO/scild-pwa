@@ -32,7 +32,6 @@ async function main() {
     include: {
       memberships: { include: { group: { select: { name: true } } } },
       titularidades: { include: { device: { select: { deviceCode: true } } } },
-      solicitudes: { select: { status: true } },
     },
   });
 
@@ -60,7 +59,6 @@ async function main() {
   console.log(`  Se llevaría consigo:`);
   console.log(`    - ${fila.memberships.length} grupo(s): ${fila.memberships.map((m) => m.group.name).join(", ") || "-"}`);
   console.log(`    - titular de ${fila.titularidades.length} botón(es): ${fila.titularidades.map((t) => t.device.deviceCode).join(", ") || "-"}`);
-  console.log(`    - ${fila.solicitudes.length} solicitud(es) de pago: ${fila.solicitudes.map((s) => s.status).join(", ") || "-"}`);
 
   if (uidVive) {
     console.log(`\n  La fila ya apunta a una cuenta viva. No hay nada que arreglar.\n`);
