@@ -9,6 +9,7 @@ import {
   cuentasCompletas,
   volverseTitular,
   ErrorDeAcceso,
+  GRUPOS_POR_BOTON,
 } from "../acceso.js";
 import { cupoValido, cuposDelGrupo, exigirLugar } from "../cupos.js";
 import { emitirAGrupo } from "../realtime.js";
@@ -113,17 +114,17 @@ router.post("/", userAuth, async (req, res) => {
     });
 
     if (botonAVincular) {
-      // Solo si el botón está libre: si ya avisa a otro grupo, se respeta y
-      // el grupo se crea igual. Moverlo es una decisión aparte.
-      const device = await tx.device.findUnique({
-        where: { id: botonAVincular },
-        select: { groupId: true },
-      });
-      if (device && !device.groupId) {
-        await tx.device.update({
-          where: { id: botonAVincular },
-          data: { groupId: creado.id, status: "OFFLINE" },
-        });
+      // Solo si al botón todavía le cabe un grupo más: si ya avisa a
+      // GRUPOS_POR_BOTON grupos, se respeta y el grupo se crea igual.
+      // Quitárselo a otro es una decisión aparte.
+      const yaVinculados = await tx.deviceGroup.count({ where: { deviceId: botonAVincular } });
+      if (yaVinculados < GRUPOS_POR_BOTON) {
+        await tx.deviceGroup.create({ data: { deviceId: botonAVincular, groupId: creado.id } });
+        // El estado solo se reinicia con el primer grupo: uno que ya venía
+        // reportándose no deja de estar en línea por sumar otro.
+        if (yaVinculados === 0) {
+          await tx.device.update({ where: { id: botonAVincular }, data: { status: "OFFLINE" } });
+        }
         await tx.auditLog.create({
           data: {
             userId: req.user.id,
@@ -139,8 +140,8 @@ router.post("/", userAuth, async (req, res) => {
     return creado;
   });
 
-  const botones = await prisma.device.count({ where: { groupId: group.id } });
-  res.status(201).json({ ...group, botonesVinculados: botones });
+  const vinculados = await prisma.deviceGroup.count({ where: { groupId: group.id } });
+  res.status(201).json({ ...group, botonesVinculados: vinculados });
 });
 
 // Un usuario se une a un grupo existente con el código de invitación
@@ -195,12 +196,20 @@ router.get("/:id", userAuth, async (req, res) => {
         include: { user: { select: { email: true, displayName: true } } },
         orderBy: { joinedAt: "asc" },
       },
+      // Los vínculos con sus botones: un botón puede estar en varios grupos,
+      // así que lo que cuelga del grupo es la fila intermedia.
       devices: {
         orderBy: { createdAt: "asc" },
-        include: { owner: { select: { id: true, displayName: true, email: true } } },
+        include: {
+          device: {
+            include: { owner: { select: { id: true, displayName: true, email: true } } },
+          },
+        },
       },
     },
   });
+
+  const botones = group.devices.map((vinculo) => vinculo.device);
 
   const ahora = Date.now();
 
@@ -210,7 +219,7 @@ router.get("/:id", userAuth, async (req, res) => {
     cuentasCompletas(group.members.map((m) => m.userId)),
     cuposDelGrupo(group.id),
     prisma.deviceHolder.findMany({
-      where: { deviceId: { in: group.devices.map((d) => d.id) } },
+      where: { deviceId: { in: botones.map((d) => d.id) } },
       select: { deviceId: true, userId: true, user: { select: { displayName: true, email: true } } },
       orderBy: { createdAt: "asc" },
     }),
@@ -247,7 +256,7 @@ router.get("/:id", userAuth, async (req, res) => {
       accesoCompleto: completas.has(m.userId),
     })),
     // Nunca se manda secretHash al cliente.
-    devices: group.devices.map((d) => ({
+    devices: botones.map((d) => ({
       id: d.id,
       deviceCode: d.deviceCode,
       name: d.name,
@@ -461,7 +470,7 @@ router.delete("/:id/members/me", userAuth, async (req, res) => {
   const [totalMiembros, totalAdmins, totalBotones] = await Promise.all([
     prisma.groupMember.count({ where: { groupId: req.params.id } }),
     prisma.groupMember.count({ where: { groupId: req.params.id, role: "ADMIN" } }),
-    prisma.device.count({ where: { groupId: req.params.id } }),
+    prisma.deviceGroup.count({ where: { groupId: req.params.id } }),
   ]);
 
   if (membresia.role === "ADMIN" && totalAdmins === 1 && totalMiembros > 1) {
@@ -635,21 +644,29 @@ router.post("/:id/devices/claim", userAuth, async (req, res) => {
     return res.status(403).json({ error: "Solo los titulares de ese botón pueden vincularlo a un grupo" });
   }
 
-  if (device.groupId === req.params.id) {
+  const vinculos = await prisma.deviceGroup.findMany({
+    where: { deviceId: device.id },
+    select: { groupId: true },
+  });
+  if (vinculos.some((v) => v.groupId === req.params.id)) {
     return res.status(409).json({ error: "Ese botón ya está en este grupo" });
   }
-  if (device.groupId) {
+  if (vinculos.length >= GRUPOS_POR_BOTON) {
     return res.status(409).json({
-      error: "Ese botón está vinculado a otro grupo. Desvincúlalo de allá para traerlo aquí.",
+      error: `Ese botón ya les avisa a ${GRUPOS_POR_BOTON} grupos, que es el máximo. Desvincúlalo de alguno para traerlo aquí.`,
     });
   }
 
   const nombre = esTexto(name) ? name.trim() : device.name;
 
   await prisma.$transaction(async (tx) => {
+    await tx.deviceGroup.create({ data: { deviceId: device.id, groupId: req.params.id } });
+
     await tx.device.update({
       where: { id: device.id },
-      data: { groupId: req.params.id, name: nombre, status: "OFFLINE" },
+      // El estado solo se reinicia con el primer grupo: un botón que ya venía
+      // reportándose no deja de estar en línea por sumar otro.
+      data: { name: nombre, ...(vinculos.length === 0 ? { status: "OFFLINE" } : {}) },
     });
 
     await tx.auditLog.create({
@@ -667,9 +684,10 @@ router.post("/:id/devices/claim", userAuth, async (req, res) => {
   res.status(201).json({ id: device.id, deviceCode: device.deviceCode, name: nombre });
 });
 
-// Desvincular: lo puede hacer su dueño o el ADMIN del grupo. El botón vuelve
-// a quedar libre para vincularse con el mismo código de su caja, y deja de
-// pertenecer al grupo (por eso hay que hacerlo antes de eliminarlo).
+// Desvincular: lo puede hacer su dueño o el ADMIN del grupo. Solo lo saca de
+// ESTE grupo: si avisa a otros, sigue avisándoles. El botón deja de pertenecer
+// al grupo (por eso hay que hacerlo antes de eliminarlo) y se puede volver a
+// vincular con el mismo código de su caja.
 router.delete("/:id/devices/:deviceId", userAuth, async (req, res) => {
   const membresia = await buscarMembresia(req.user.id, req.params.id);
   if (!membresia) {
@@ -677,7 +695,7 @@ router.delete("/:id/devices/:deviceId", userAuth, async (req, res) => {
   }
 
   const device = await prisma.device.findFirst({
-    where: { id: req.params.deviceId, groupId: req.params.id },
+    where: { id: req.params.deviceId, groups: { some: { groupId: req.params.id } } },
   });
   if (!device) {
     return res.status(404).json({ error: "Ese botón no es de este grupo" });
@@ -687,15 +705,23 @@ router.delete("/:id/devices/:deviceId", userAuth, async (req, res) => {
     return res.status(403).json({ error: "Solo su dueño o el administrador del grupo pueden desvincularlo" });
   }
 
+  const restantes = await prisma.deviceGroup.count({
+    where: { deviceId: device.id, groupId: { not: req.params.id } },
+  });
+
   await prisma.$transaction([
     // Sale del grupo, pero NO deja de ser suyo: sus titulares siguen siendo
     // titulares (el acceso completo es de la cuenta) y se puede volver a
     // vincular aquí o en otro grupo. El cupo del grupo no se mueve: nunca
     // dependió de los botones.
-    prisma.device.update({
-      where: { id: device.id },
-      data: { groupId: null, status: "OFFLINE" },
+    prisma.deviceGroup.delete({
+      where: { deviceId_groupId: { deviceId: device.id, groupId: req.params.id } },
     }),
+    // Solo se marca sin conexión si no le queda ningún grupo: uno que sigue
+    // avisando a otros no dejó de funcionar por salirse de este.
+    ...(restantes === 0
+      ? [prisma.device.update({ where: { id: device.id }, data: { status: "OFFLINE" } })]
+      : []),
     prisma.auditLog.create({
       data: {
         userId: req.user.id,

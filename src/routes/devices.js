@@ -88,9 +88,15 @@ async function ventanaDeReintento(deviceId) {
 router.post("/panic", deviceAuth, async (req, res) => {
   const device = req.device;
 
-  // Un botón recién salido de fábrica, o desvinculado, no tiene a quién
-  // avisarle. Se responde claro para que el firmware lo pueda mostrar.
-  if (!device.groupId) {
+  // A qué grupos les avisa, del más antiguo al más nuevo. Un botón recién
+  // salido de fábrica, o desvinculado de todos, no tiene a quién avisarle. Se
+  // responde claro para que el firmware lo pueda mostrar.
+  const vinculos = await prisma.deviceGroup.findMany({
+    where: { deviceId: device.id },
+    orderBy: { createdAt: "asc" },
+    select: { groupId: true },
+  });
+  if (vinculos.length === 0) {
     return res.status(409).json({ error: "Dispositivo sin vincular a un grupo" });
   }
 
@@ -102,32 +108,58 @@ router.post("/panic", deviceAuth, async (req, res) => {
   // mismo botonazo. Dentro de la ventana de cooldown se le devuelve la
   // alerta que ya se creó, con el mismo alertId.
   const ventana = await ventanaDeReintento(device.id);
-  const reciente = await prisma.alert.findFirst({
+  const recientes = await prisma.alert.findMany({
     where: {
       deviceId: device.id,
       source: "DEVICE",
       status: "ACTIVE",
       createdAt: { gt: new Date(Date.now() - ventana * 1000) },
     },
-    orderBy: { createdAt: "desc" },
+    orderBy: { createdAt: "asc" },
   });
 
-  if (reciente) {
-    return res.status(200).json({ alertId: reciente.id, createdAt: reciente.createdAt, repetida: true });
+  if (recientes.length > 0) {
+    return res.status(200).json({
+      alertId: recientes[0].id,
+      alertIds: recientes.map((a) => a.id),
+      createdAt: recientes[0].createdAt,
+      repetida: true,
+    });
   }
 
-  const alert = await prisma.$transaction(async (tx) => {
-    const createdAlert = await tx.alert.create({
-      data: {
-        groupId: device.groupId,
-        deviceId: device.id,
-        source: "DEVICE",
-        status: "ACTIVE",
-      },
-    });
+  // Una alerta por cada grupo: cada uno tiene su chat, su historial y su
+  // propio "ya voy" / "resuelta", y no se puede resolver una emergencia en un
+  // grupo sin que los demás lo sepan.
+  const alertas = await prisma.$transaction(async (tx) => {
+    const creadas = [];
+    // Quien está en varios de estos grupos recibe UN solo aviso, por el más
+    // antiguo; en el chat de los demás la alerta aparece igual.
+    const yaAvisados = new Set();
+
+    for (const { groupId } of vinculos) {
+      const alerta = await tx.alert.create({
+        data: {
+          groupId,
+          deviceId: device.id,
+          source: "DEVICE",
+          status: "ACTIVE",
+        },
+      });
+
+      await crearNotificacionesPendientes(tx, {
+        alertId: alerta.id,
+        groupId,
+        excluirUserIds: [...yaAvisados],
+      });
+
+      const miembros = await tx.groupMember.findMany({ where: { groupId }, select: { userId: true } });
+      for (const m of miembros) yaAvisados.add(m.userId);
+
+      creadas.push(alerta);
+    }
 
     await tx.deviceEvent.create({
-      data: { deviceId: device.id, type: "PANIC" },
+      data: { deviceId: device.id, type: "PANIC", payload: { grupos: vinculos.map((v) => v.groupId) } },
     });
 
     await tx.device.update({
@@ -135,32 +167,35 @@ router.post("/panic", deviceAuth, async (req, res) => {
       data: { status: "EMERGENCY", lastSeenAt: new Date() },
     });
 
-    await crearNotificacionesPendientes(tx, {
-      alertId: createdAlert.id,
-      groupId: device.groupId,
-    });
-
-    return createdAlert;
+    return creadas;
   });
 
   // El backend confirma la recepción y devuelve el id único de la alerta,
-  // tal como pide la propuesta (sección 17).
-  res.status(201).json({ alertId: alert.id, createdAt: alert.createdAt });
-  emitirAGrupo(device.groupId, "alertas:cambio", { groupId: device.groupId, alertId: alert.id });
+  // tal como pide la propuesta (sección 17). alertId es el del grupo más
+  // antiguo; alertIds trae todos.
+  res.status(201).json({
+    alertId: alertas[0].id,
+    alertIds: alertas.map((a) => a.id),
+    createdAt: alertas[0].createdAt,
+  });
 
-  // El push se manda DESPUÉS de responder: el ESP32 corre con batería y un
-  // timeout corto, no puede quedarse esperando a que FCM conteste. Si esto
-  // falla, las Notification quedan en PENDING y se pueden reintentar.
-  enviarPushDeAlerta(alert.id)
-    .then((resumen) => {
-      console.log(
-        `Alerta ${alert.id}: push a ${resumen.tokens} tokens, ` +
-          `${resumen.enviadas} entregadas, ${resumen.fallidas} fallidas`
-      );
-    })
-    .catch((e) => {
-      console.error(`No se pudo enviar el push de la alerta ${alert.id}:`, e);
-    });
+  for (const alerta of alertas) {
+    emitirAGrupo(alerta.groupId, "alertas:cambio", { groupId: alerta.groupId, alertId: alerta.id });
+
+    // El push se manda DESPUÉS de responder: el ESP32 corre con batería y un
+    // timeout corto, no puede quedarse esperando a que FCM conteste. Si esto
+    // falla, las Notification quedan en PENDING y se pueden reintentar.
+    enviarPushDeAlerta(alerta.id)
+      .then((resumen) => {
+        console.log(
+          `Alerta ${alerta.id}: push a ${resumen.tokens} tokens, ` +
+            `${resumen.enviadas} entregadas, ${resumen.fallidas} fallidas`
+        );
+      })
+      .catch((e) => {
+        console.error(`No se pudo enviar el push de la alerta ${alerta.id}:`, e);
+      });
+  }
 });
 
 router.post("/status", deviceAuth, async (req, res) => {

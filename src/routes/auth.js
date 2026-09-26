@@ -125,7 +125,7 @@ router.delete("/me", userAuth, async (req, res) => {
     const [totalMiembros, totalAdmins, totalBotones] = await Promise.all([
       prisma.groupMember.count({ where: { groupId: m.groupId } }),
       prisma.groupMember.count({ where: { groupId: m.groupId, role: "ADMIN" } }),
-      prisma.device.count({ where: { groupId: m.groupId } }),
+      prisma.deviceGroup.count({ where: { groupId: m.groupId } }),
     ]);
 
     if (m.role === "ADMIN" && totalAdmins === 1 && totalMiembros > 1) {

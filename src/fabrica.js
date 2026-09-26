@@ -68,9 +68,10 @@ export async function crearDispositivo({ deviceCode, nombre = null, groupId = nu
       name: nombre?.trim() || null,
       secretHash,
       claimCode,
-      groupId,
       ownerId: null,
       claimedAt: groupId ? new Date() : null,
+      // Solo para pruebas: dejarlo ya vinculado a un grupo.
+      ...(groupId ? { groups: { create: { groupId } } } : {}),
     },
   });
 

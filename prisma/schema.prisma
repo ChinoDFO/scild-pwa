@@ -95,7 +95,9 @@ model Group {
   updatedAt  DateTime @updatedAt
 
   members  GroupMember[]
-  devices  Device[]
+  // Los botones que le avisan a este grupo (la tabla intermedia: un botón
+  // puede avisarle a varios grupos, ver DeviceGroup).
+  devices  DeviceGroup[]
   alerts   Alert[]
   messages Message[]
 }
@@ -128,13 +130,12 @@ model GroupMember {
 // lo compara contra secretHash (bcrypt/argon2), nunca al revés.
 //
 // Un botón existe desde que sale de fábrica, antes de pertenecer a nadie:
-// por eso groupId y ownerId son opcionales. Se llenan cuando alguien lo
-// vincula desde la app con el claimCode impreso en su caja.
+// por eso ownerId es opcional y no tiene ningún grupo (DeviceGroup). Se llenan
+// cuando alguien lo vincula desde la app con el claimCode impreso en su caja.
 model Device {
   id                String       @id @default(uuid())
   deviceCode        String       @unique
   name              String?
-  groupId           String?
   // Quién lo vinculó. En un coto es el vecino dueño de esa casa.
   ownerId           String?
   // El código impreso en la caja. NO cambia al desvincular: el papel de la
@@ -162,16 +163,38 @@ model Device {
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
 
-  // SetNull y no Cascade: si un grupo se elimina, el botón físico sigue
-  // existiendo y se puede volver a vincular; borrar su registro haría
-  // inservible el aparato (su secreto no se puede recuperar).
-  group          Group?                @relation(fields: [groupId], references: [id], onDelete: SetNull)
   owner          User?                 @relation("DeviceOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  // A qué grupos les avisa (hasta GRUPOS_POR_BOTON, ver src/acceso.js).
+  groups         DeviceGroup[]
   holders        DeviceHolder[]
   alerts         Alert[]
   events         DeviceEvent[]
   configurations DeviceConfiguration[]
+}
 
+// A qué grupos les avisa un botón. Antes era una sola columna en Device, y
+// por eso un botón solo podía avisarle a un grupo; ahora son hasta tres
+// (GRUPOS_POR_BOTON en src/acceso.js): un negocio que atiende a su cuadra y a
+// la asociación de comerciantes, una casa que avisa a la familia y al coto.
+//
+// Cascade por los dos lados, y es a propósito: si un grupo se elimina, su
+// vínculo se va con él pero el botón físico sigue existiendo y se puede volver
+// a vincular. Borrar el registro del aparato lo dejaría inservible (su secreto
+// no se puede recuperar) y aquí solo se borra la fila del vínculo.
+//
+// createdAt manda el orden: el grupo más antiguo es el "principal", el que da
+// nombre y dirección al aparato (lo que muestra por el puerto serie).
+model DeviceGroup {
+  id        String   @id @default(uuid())
+  deviceId  String
+  groupId   String
+  createdAt DateTime @default(now())
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  group  Group  @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  // El mismo botón no ocupa dos veces el mismo grupo.
+  @@unique([deviceId, groupId])
   @@index([groupId])
 }
 

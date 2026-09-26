@@ -112,7 +112,7 @@ async function main() {
   // --- 4. Reporte ---------------------------------------------------------
   const devices = await prisma.device.findMany({
     where: { deviceCode: { in: [...BOTONES.map((b) => b.deviceCode), "BTN-001"] } },
-    include: { holders: { include: { user: { select: { email: true } } } }, group: { select: { name: true } } },
+    include: { holders: { include: { user: { select: { email: true } } } }, groups: { orderBy: { createdAt: "asc" }, select: { group: { select: { name: true } } } } },
     orderBy: { deviceCode: "asc" },
   });
 
@@ -124,7 +124,7 @@ async function main() {
     console.log(`\n  ${d.deviceCode}  (${d.name ?? "sin nombre"})`);
     console.log(`    código de la caja : ${d.claimCode ? formatearClaimCode(d.claimCode) : "(sin código)"}`);
     console.log(`    titulares         : ${d.holders.length}/${TITULARES_POR_BOTON} ${d.holders.length ? "-> " + d.holders.map((h) => h.user.email).join(", ") : "(libre)"}`);
-    console.log(`    grupo             : ${d.group?.name ?? "sin vincular a un grupo"}`);
+    console.log(`    grupos            : ${d.groups.length ? d.groups.map((v) => v.group.name).join(", ") : "sin vincular a un grupo"}`);
     const s = secretos.get(d.deviceCode);
     if (s) {
       console.log(`    deviceSecret      : ${s}`);

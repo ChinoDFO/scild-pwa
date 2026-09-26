@@ -56,7 +56,7 @@ router.get("/clientes", async (req, res) => {
       name: true,
       deviceCode: true,
       createdAt: true,
-      group: { select: { name: true } },
+      groups: { orderBy: { createdAt: "asc" }, select: { group: { select: { name: true } } } },
       holders: {
         orderBy: { createdAt: "asc" },
         select: {
@@ -76,7 +76,7 @@ router.get("/clientes", async (req, res) => {
         deviceId: d.id,
         nombre: d.name || d.deviceCode,
         deviceCode: d.deviceCode,
-        grupo: d.group?.name ?? null,
+        grupos: d.groups.map((v) => v.group.name),
         // El titular que lo registró primero: el cliente.
         cliente: {
           userId: primero.user.id,
@@ -113,7 +113,7 @@ router.get("/dispositivos", async (req, res) => {
       createdAt: true,
       lastSeenAt: true,
       firmwareVersion: true,
-      group: { select: { name: true } },
+      groups: { orderBy: { createdAt: "asc" }, select: { group: { select: { name: true } } } },
     },
     orderBy: { createdAt: "desc" },
     take: 100,
@@ -132,7 +132,7 @@ router.get("/dispositivos", async (req, res) => {
       // si no, es un registro en la base y nada más.
       probado: Boolean(d.lastSeenAt),
       firmware: d.firmwareVersion,
-      grupo: d.group?.name ?? null,
+      grupos: d.groups.map((v) => v.group.name),
     })),
   });
 });

@@ -140,7 +140,12 @@ export async function configuracionParaElBoton(deviceId) {
         name: true,
         deviceCode: true,
         heartbeatInterval: true,
-        group: { select: { name: true, address: true } },
+        // El grupo principal (el más antiguo) da nombre y dirección al aparato.
+        groups: {
+          orderBy: { createdAt: "asc" },
+          take: 1,
+          select: { group: { select: { name: true, address: true } } },
+        },
       },
     }),
     prisma.deviceConfiguration.findMany({ where: { deviceId } }),
@@ -154,8 +159,8 @@ export async function configuracionParaElBoton(deviceId) {
     // El aparato lo enseña por el puerto serie y lo usa como título de su
     // portal; el nombre del establecimiento es el del grupo donde está
     // vinculado, igual que en la app.
-    nombre: device.group?.name || device.name || device.deviceCode,
-    direccion: device.group?.address ?? "",
+    nombre: device.groups[0]?.group.name || device.name || device.deviceCode,
+    direccion: device.groups[0]?.group.address ?? "",
     heartbeatSegundos: device.heartbeatInterval,
     cooldownSegundos: Number(valor("cooldownSegundos")) || 10,
     ssidRespaldo: valor("ssidRespaldo"),

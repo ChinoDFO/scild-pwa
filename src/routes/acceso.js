@@ -41,7 +41,13 @@ router.get("/", userAuth, async (req, res) => {
             rssi: true,
             internetFailures: true,
             heartbeatInterval: true,
-            group: { select: { id: true, name: true, address: true } },
+            // Todos los grupos a los que les avisa, del más antiguo al más
+            // nuevo. El primero es el "principal": el que da nombre y
+            // dirección al aparato.
+            groups: {
+              orderBy: { createdAt: "asc" },
+              select: { group: { select: { id: true, name: true, address: true } } },
+            },
           },
         }),
         prisma.deviceHolder.findMany({
@@ -65,10 +71,11 @@ router.get("/", userAuth, async (req, res) => {
         id: device.id,
         nombre: device.name || device.deviceCode,
         deviceCode: device.deviceCode,
-        grupo: device.group && { id: device.group.id, name: device.group.name },
-        // La dirección del botón es la del establecimiento donde está
-        // vinculado: el aparato no tiene una propia.
-        direccion: device.group?.address ?? null,
+        // A qué grupos les avisa (hasta GRUPOS_POR_BOTON). Vacío = sin vincular.
+        grupos: device.groups.map((v) => ({ id: v.group.id, name: v.group.name })),
+        // La dirección del botón es la del establecimiento del grupo
+        // principal: el aparato no tiene una propia.
+        direccion: device.groups[0]?.group.address ?? null,
         estado: estadoEfectivo(device, Date.now()),
         ultimaSenal: device.lastSeenAt,
         bateria: device.batteryLevel,
@@ -247,8 +254,8 @@ router.post("/vincular", userAuth, async (req, res) => {
     nombre: device.name || device.deviceCode,
     // Qué número de titular te tocó (1 = eres el primero, 3 = el último).
     titulares,
-    // El botón todavía tiene que vincularse a un grupo para que avise.
-    groupId: device.groupId,
+    // El botón todavía tiene que vincularse a un grupo para que avise (los
+    // grupos a los que ya les avisa se piden en GET /api/acceso).
   });
 });
 

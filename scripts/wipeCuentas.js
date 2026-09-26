@@ -136,9 +136,15 @@ async function main() {
   console.log("Borrando de Postgres...");
   const idsGruposABorrar = gruposABorrar.map((g) => g.id);
   await prisma.$transaction([
+    // Los botones de esos grupos quedan sin ninguno (sus vínculos se van con
+    // el grupo, en cascada): se marcan sin conexión. Los que además avisan a
+    // un grupo que SE CONSERVA no se tocan.
     prisma.device.updateMany({
-      where: { groupId: { in: idsGruposABorrar } },
-      data: { groupId: null, ownerId: null, status: "OFFLINE" },
+      where: {
+        groups: { some: { groupId: { in: idsGruposABorrar } } },
+        NOT: { groups: { some: { groupId: { notIn: idsGruposABorrar } } } },
+      },
+      data: { ownerId: null, status: "OFFLINE" },
     }),
     prisma.group.deleteMany({ where: { id: { in: idsGruposABorrar } } }),
     prisma.user.deleteMany({ where: { id: { in: usuarios.map((u) => u.id) } } }),

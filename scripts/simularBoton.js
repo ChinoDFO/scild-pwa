@@ -95,7 +95,8 @@ async function panic() {
   const { status, datos } = await llamar("/api/devices/panic", { firmwareVersion: "v8-sim" });
 
   if (status === 201) {
-    console.log(`🚨 Alerta creada. id=${datos.alertId} (${datos.createdAt})`);
+    const grupos = datos.alertIds?.length ?? 1;
+    console.log(`🚨 Alerta creada en ${grupos} grupo(s). id=${datos.alertId} (${datos.createdAt})`);
     return;
   }
   if (status === 200 && datos.repetida) {

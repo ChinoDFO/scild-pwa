@@ -78,10 +78,10 @@ faltan el ESP32 físico real y tener todo publicado con HTTPS (ver roadmap).
 
 ### Backend (`scild-backend`)
 
-- **Base de datos** migrada en Neon con 11 tablas: `User`, `Group`,
+- **Base de datos** migrada en Neon con 12 tablas: `User`, `Group`,
   `GroupMember`, `Device`, `DeviceEvent`, `DeviceConfiguration`, `Alert`,
-  `Notification`, `PushToken`, `Message`, `AuditLog`. Ver
-  `prisma/schema.prisma`.
+  `Notification`, `PushToken`, `Message`, `AuditLog` y `DeviceGroup` (los
+  grupos a los que avisa cada botón). Ver `prisma/schema.prisma`.
 - **Endpoints del ESP32** (autenticados con headers `x-device-code` /
   `x-device-secret`, comparados contra el hash guardado):
   - `POST /api/devices/heartbeat` — reporta que sigue vivo y **cómo está**:
@@ -94,14 +94,19 @@ faltan el ESP32 físico real y tener todo publicado con HTTPS (ver roadmap).
     hablar. El aparato manda en `configVersion` la huella que ya tiene
     aplicada; si coincide se le contesta `config: null` y no reescribe su
     memoria flash.
-  - `POST /api/devices/panic` — crea una `Alert`, pone el dispositivo en
-    `EMERGENCY`, devuelve el id de la alerta creada. Un botón sin vincular
-    responde 409: no tiene a quién avisarle (el heartbeat sí funciona, para
-    poder probarlo antes de venderlo). **Los reintentos no duplican la
-    alerta**: si llega otro `/panic` del mismo botón dentro de su cooldown
-    (mínimo 15s) se devuelve `200` con el mismo `alertId` y `repetida: true`,
-    porque desde el aparato no se distingue "no llegó" de "se perdió el
-    acuse".
+  - `POST /api/devices/panic` — crea **una `Alert` por cada grupo al que le
+    avisa el botón** (hasta 3, ver "Un botón, varios grupos" abajo), pone el
+    dispositivo en `EMERGENCY` y devuelve `alertId` (el del grupo más
+    antiguo) y `alertIds` (todos). Un botón sin ningún grupo responde 409: no
+    tiene a quién avisarle (el heartbeat sí funciona, para poder probarlo
+    antes de venderlo). Quien está en varios de esos grupos recibe **un solo
+    aviso** (por el más antiguo); la alerta aparece igual en el chat de cada
+    uno. **Los reintentos no duplican nada**: si llega otro `/panic` del
+    mismo botón dentro de su cooldown (mínimo 15s) se devuelve `200` con el
+    mismo `alertId` y `repetida: true`, porque desde el aparato no se
+    distingue "no llegó" de "se perdió el acuse". El botón vuelve a `ONLINE`
+    cuando se resuelve la última alerta abierta de **cualquiera** de sus
+    grupos.
   - `POST /api/devices/status` — reporta estado (`ONLINE`/`MAINTENANCE`
     solamente; `EMERGENCY` solo lo dispara `/panic`, nunca el propio
     dispositivo). Acepta la misma telemetría y devuelve la misma
@@ -125,6 +130,18 @@ faltan el ESP32 físico real y tener todo publicado con HTTPS (ver roadmap).
     hace lo mismo que el aparato, desde la compu: sirve para probar la
     cadena completa sin hardware (`--panic` dispara una alerta, `--cada 30`
     se queda mandando heartbeats).
+- **Un botón, varios grupos** (`DeviceGroup`, `GRUPOS_POR_BOTON = 3` en
+  `src/acceso.js`). Antes `Device.groupId` guardaba un solo grupo; ahora es
+  una tabla intermedia y un mismo botón puede avisar hasta a **3 grupos**: un
+  negocio que atiende a su cuadra y a la asociación de comerciantes, una casa
+  que avisa a la familia y al coto. El tope se aplica en la aplicación, no en
+  la base ("máximo N filas" no existe en SQL sin un trigger). El grupo **más
+  antiguo es el principal**: da nombre y dirección al aparato (lo que baja en
+  el heartbeat) y es el que edita "Configura tu botón". Al borrarse un grupo
+  se va su vínculo pero el botón sigue existiendo. `GET /api/acceso` trae
+  `grupos: [{ id, name }]` por botón (vacío = sin vincular) y los listados de
+  administración `grupos: [nombre]`. La migración conservó los vínculos que
+  ya existían.
 - **Endpoints de usuario** (autenticados con `Authorization: Bearer
   <idToken>` de Firebase):
   - `GET /api/auth/me` — perfil + grupos del usuario (se autocrea en
@@ -161,11 +178,13 @@ faltan el ESP32 físico real y tener todo publicado con HTTPS (ver roadmap).
   - `POST /api/groups/:id/devices/claim` `{ claimCode, name? }` — vincula
     un botón al grupo con el código de su caja. Lo puede hacer **cualquier
     miembro** (en un coto, cada vecino vincula el suyo) y queda como su
-    dueño. 409 si ya estaba vinculado, y el mismo 404 exista o no el
-    código, para que nadie ande adivinando códigos.
-  - `DELETE /api/groups/:id/devices/:deviceId` — desvincular. Solo su dueño
-    o el ADMIN del grupo. El botón queda libre y se puede volver a vincular
-    con el mismo código, aquí o en otro grupo.
+    dueño. 409 si ya estaba en **este** grupo o si ya avisa a 3 (el máximo),
+    y el mismo 404 exista o no el código, para que nadie ande adivinando
+    códigos.
+  - `DELETE /api/groups/:id/devices/:deviceId` — desvincular **de este
+    grupo**. Solo su dueño o el ADMIN del grupo. Si el botón avisa a otros
+    grupos, sigue avisándoles; solo queda sin conexión y libre cuando se
+    quita del último. Se puede volver a vincular con el mismo código.
   - `POST /api/groups/:id/read` — marca el chat como leído hasta ahora.
     Pone en cero el contador de `GET /api/auth/me` y hace que el siguiente
     aviso push traiga el mensaje en vez de "N mensajes nuevos".

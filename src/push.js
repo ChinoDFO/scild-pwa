@@ -44,6 +44,10 @@ function mensajeDeAlerta(alerta, aviso, tokens) {
       alertId: alerta.id,
       groupId: alerta.groupId,
       source: alerta.source,
+      // Qué tipo de alerta es. La PWA lo usa para decidir si hace sonar la
+      // sirena: solo el SOS y el botón físico (GENERAL) la merecen; un
+      // "carro sospechoso" se avisa, pero sin ruido.
+      type: alerta.type,
       createdAt: alerta.createdAt.toISOString(),
     },
     webpush: {
@@ -118,9 +122,18 @@ function armarAviso(alerta) {
 // durable de a quién había que avisar incluso si FCM falla después, y el
 // envío puede reintentarse leyendo las que quedaron en PENDING.
 // excluirUserId: en una alerta manual, quien la generó no necesita aviso.
-export async function crearNotificacionesPendientes(tx, { alertId, groupId, excluirUserId }) {
+// excluirUserIds: personas que ya reciben el aviso de esta misma emergencia por
+// otro grupo. Cuando el botón físico avisa a varios grupos crea una alerta en
+// cada uno; quien está en dos de ellos vería el mismo aviso y sonaría dos
+// veces, así que a esa persona solo se le avisa por el primero (la alerta
+// sigue apareciendo en el chat de los dos).
+export async function crearNotificacionesPendientes(
+  tx,
+  { alertId, groupId, excluirUserId, excluirUserIds = [] }
+) {
+  const excluidos = [...excluirUserIds, ...(excluirUserId ? [excluirUserId] : [])];
   const miembros = await tx.groupMember.findMany({
-    where: { groupId, ...(excluirUserId ? { userId: { not: excluirUserId } } : {}) },
+    where: { groupId, ...(excluidos.length > 0 ? { userId: { notIn: excluidos } } : {}) },
     select: { userId: true },
   });
 

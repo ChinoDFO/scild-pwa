@@ -18,6 +18,13 @@ import { normalizarClaimCode } from "./claimCode.js";
 // Por eso el código de la caja se puede validar tres veces.
 export const TITULARES_POR_BOTON = 3;
 
+// A cuántos grupos les puede avisar un mismo botón. Un negocio que atiende a
+// su cuadra y a la asociación de comerciantes, una casa que avisa a la
+// familia y al coto: más de un grupo, pero no tantos que una sola pulsación
+// dispare avisos a medio barrio. Se aplica en la aplicación (al vincular), no
+// en la base: "máximo N filas por botón" no existe en SQL sin un trigger.
+export const GRUPOS_POR_BOTON = 3;
+
 // Tope de gente en un grupo. El cupo de cada uno lo edita su administrador
 // (Group.maxMembers) y no puede pasar de aquí.
 export const MAX_MIEMBROS_POR_GRUPO = 50;
