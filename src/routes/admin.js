@@ -1,7 +1,7 @@
 import { Router } from "express";
 import prisma from "../prisma.js";
 import { userAuth } from "../middleware/userAuth.js";
-import { TITULARES_POR_BOTON } from "../acceso.js";
+import { GRUPOS_POR_BOTON, TITULARES_POR_BOTON } from "../acceso.js";
 import { formatearClaimCode } from "../claimCode.js";
 import { crearDispositivo, siguienteDeviceCode, validarDeviceCode } from "../fabrica.js";
 
@@ -13,7 +13,7 @@ const router = Router();
 // otorgarlo a propósito: si lo hubiera, sería el camino más corto para que
 // una cuenta comprometida se regale todo.
 //
-// Trae la lista de clientes y el alta de botones (lo que se hace al
+// Trae la lista de botones en uso y el alta de botones (lo que se hace al
 // fabricarlos). Antes tenía las solicitudes de pago, pero se quitó el sistema
 // de pagos: ya no hay accesos que comprar ni comprobantes que revisar. Lo que
 // falta aquí (está en el roadmap) es el estado de los botones, las alertas
@@ -28,25 +28,35 @@ router.use(userAuth, (req, res, next) => {
 
 const nombreDe = (u) => u?.displayName || u?.email || "—";
 
-// Un renglón por botón registrado, con quien lo registró primero (el cliente
-// de verdad) y con quién lo comparte. Ya no dice "lugares ocupados": el cupo
-// dejó de salir de los botones y ahora es del grupo, editable por su
-// administrador (ver src/cupos.js).
-router.get("/clientes", async (req, res) => {
+// Un renglón por botón que ya tiene dueño, con DOS listas que son cosas
+// distintas y no se deben mezclar:
+//   - personas: quiénes comparten el botón (los titulares, hasta tres). Es
+//     quien capturó el código de su caja.
+//   - grupos: a quiénes les avisa cuando se presiona (hasta tres). Es a donde
+//     llega la alerta.
+// Una persona puede compartir un botón sin estar en ninguno de sus grupos, y un
+// grupo puede recibir un botón cuyos titulares ni conoce.
+//
+// Antes esto se llamaba "clientes" y titulaba cada renglón con la primera
+// persona: con varios botones por persona (o una persona en varios botones)
+// parecía que el botón era de ella y que "compartía" con los demás.
+router.get("/botones", async (req, res) => {
   const { q } = req.query;
 
+  const contiene = { contains: q, mode: "insensitive" };
   const devices = await prisma.device.findMany({
     where: {
       // Solo botones que alguien ya registró: los que siguen en el almacén
-      // no son clientes todavía.
+      // no tienen dueño todavía (esos van en el inventario).
       holders: { some: {} },
       ...(q
         ? {
             OR: [
-              { deviceCode: { contains: q, mode: "insensitive" } },
-              { name: { contains: q, mode: "insensitive" } },
-              { holders: { some: { user: { email: { contains: q, mode: "insensitive" } } } } },
-              { holders: { some: { user: { displayName: { contains: q, mode: "insensitive" } } } } },
+              { deviceCode: contiene },
+              { name: contiene },
+              { holders: { some: { user: { email: contiene } } } },
+              { holders: { some: { user: { displayName: contiene } } } },
+              { groups: { some: { group: { name: contiene } } } },
             ],
           }
         : {}),
@@ -61,7 +71,7 @@ router.get("/clientes", async (req, res) => {
         orderBy: { createdAt: "asc" },
         select: {
           createdAt: true,
-          user: { select: { id: true, displayName: true, email: true, createdAt: true } },
+          user: { select: { id: true, displayName: true, email: true } },
         },
       },
     },
@@ -70,27 +80,21 @@ router.get("/clientes", async (req, res) => {
   });
 
   res.json(
-    devices.map((d) => {
-      const [primero, ...resto] = d.holders;
-      return {
-        deviceId: d.id,
-        nombre: d.name || d.deviceCode,
-        deviceCode: d.deviceCode,
-        grupos: d.groups.map((v) => v.group.name),
-        // El titular que lo registró primero: el cliente.
-        cliente: {
-          userId: primero.user.id,
-          nombre: nombreDe(primero.user),
-          email: primero.user.email,
-          registradoEl: primero.createdAt,
-        },
-        // Con quién más lo comparte: el código de la caja vale para tres
-        // personas, así que aquí pueden salir hasta dos nombres.
-        acompanantes: resto.map((h) => nombreDe(h.user)),
-        titulares: d.holders.length,
-        titularesTotales: TITULARES_POR_BOTON,
-      };
-    })
+    devices.map((d) => ({
+      deviceId: d.id,
+      deviceCode: d.deviceCode,
+      // El nombre que le puso su dueño, si lo hay; el código ya va aparte.
+      nombre: d.name,
+      personas: d.holders.map((h) => ({
+        userId: h.user.id,
+        nombre: nombreDe(h.user),
+        email: h.user.email,
+        desde: h.createdAt,
+      })),
+      personasTotales: TITULARES_POR_BOTON,
+      grupos: d.groups.map((v) => v.group.name),
+      gruposTotales: GRUPOS_POR_BOTON,
+    }))
   );
 });
 

@@ -175,12 +175,13 @@ faltan el ESP32 físico real y tener todo publicado con HTTPS (ver roadmap).
     botones vinculados: el ESP32 se quedaría sin a quién avisar y su
     secreto no se puede recuperar (falta "desvincular botón" en el
     roadmap).
-  - `POST /api/groups/:id/devices/claim` `{ claimCode, name? }` — vincula
-    un botón al grupo con el código de su caja. Lo puede hacer **cualquier
-    miembro** (en un coto, cada vecino vincula el suyo) y queda como su
-    dueño. 409 si ya estaba en **este** grupo o si ya avisa a 3 (el máximo),
-    y el mismo 404 exista o no el código, para que nadie ande adivinando
-    códigos.
+  - `POST /api/groups/:id/devices/claim` `{ deviceId, name? }` — hace que
+    un botón **avise a este grupo**. Solo un titular, y solo con un botón que
+    ya es suyo: **no vuelve titular a nadie** (ver "Personas y grupos son
+    cosas aparte"). 403 —el mismo si el botón no existe o no es suyo, para no
+    confirmar qué ids son reales— si no es titular; 409 si ya estaba en
+    **este** grupo o si ya avisa a 3 (el máximo). Si llega `claimCode`, 400
+    con la instrucción de usar Códigos.
   - `DELETE /api/groups/:id/devices/:deviceId` — desvincular **de este
     grupo**. Solo su dueño o el ADMIN del grupo. Si el botón avisa a otros
     grupos, sigue avisándoles; solo queda sin conexión y libre cuando se
@@ -275,14 +276,22 @@ faltan el ESP32 físico real y tener todo publicado con HTTPS (ver roadmap).
   - Endpoints en `src/routes/acceso.js`: `GET /api/acceso` (lo que pinta el
     apartado de Códigos, con el monitoreo del botón) y
     `POST /api/acceso/vincular` `{ claimCode }`.
-  - `POST /api/groups/:id/devices/claim` acepta `claimCode` (te vuelve
-    titular **y** vincula el botón al grupo) o `deviceId` (traes al grupo
-    un botón del que ya eres titular). Solo un titular puede vincularlo:
-    es decidir a quién le avisa.
+  - **Personas y grupos son cosas aparte.** Una persona se vuelve titular de
+    un botón capturando el código de su caja (registro o Códigos, hasta 3 por
+    botón); un botón avisa a un grupo cuando un titular lo vincula desde ese
+    grupo (hasta 3 grupos). Antes `POST /api/groups/:id/devices/claim`
+    aceptaba el código y hacía las dos cosas a la vez: quien solo quería meter
+    un botón a su grupo terminaba ocupando un lugar de titular de un aparato
+    que nadie le había compartido, y el panel mostraba gente "compartiendo"
+    botones sin haberlo decidido (lo encontró la bitácora: `DEVICE_HOLDER_ADDED`
+    y `DEVICE_CLAIMED` en el mismo segundo). Ahora la pantalla del grupo elige
+    entre los botones de la cuenta y ya no pide el código.
 - **Panel de administración (`src/routes/admin.js`)**:
-  - `GET /api/admin/clientes` — un renglón por botón registrado, con quien
-    lo dio de alta, con quién lo comparte y cuántos de sus tres titulares se
-    usaron.
+  - `GET /api/admin/botones` (`?q=` busca por código, correo, apodo o grupo)
+    — un renglón por botón con dueño y **dos listas separadas**: `personas`
+    (quiénes lo comparten, de 3) y `grupos` (a quiénes les avisa, de 3). Antes
+    era `/clientes`, que titulaba cada renglón con la primera persona y
+    mezclaba todo en una línea.
   - `GET /api/admin/dispositivos` — el **inventario**: botones dados de alta
     que todavía no tiene nadie, con el código impreso en su caja (por si hay
     que reimprimir la etiqueta) y `siguienteCodigo`, el siguiente libre de

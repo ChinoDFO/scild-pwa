@@ -7,7 +7,6 @@ import { buscarMembresia, estadoEfectivo } from "../membership.js";
 import {
   accesoDeCuenta,
   cuentasCompletas,
-  volverseTitular,
   ErrorDeAcceso,
   GRUPOS_POR_BOTON,
 } from "../acceso.js";
@@ -597,13 +596,18 @@ router.patch("/:id/members/:userId", userAuth, async (req, res) => {
 // Vincula un botón a este grupo: es lo que hace que el botón le avise a esta
 // gente. No mueve el cupo del grupo, que es suyo y lo edita su administrador.
 //
-// Acepta dos caminos, porque son dos momentos distintos:
-//   - claimCode: el código impreso en la caja. Además de vincular el botón al
-//     grupo, deja a quien lo captura como titular (el código vale para tres
-//     personas). Es el camino desde la info del grupo, para quien compró el
-//     botón y lo está estrenando.
-//   - deviceId: un botón del que ya eres titular, p. ej. porque capturaste el
-//     código al crear tu cuenta. Solo lo trae a este grupo.
+// Son DOS cosas distintas y esta ruta solo hace la segunda:
+//   - quién comparte el botón (los titulares, hasta tres): se decide al
+//     capturar el código de su caja, en el registro o en Códigos;
+//   - a qué grupos les avisa (hasta GRUPOS_POR_BOTON): se decide aquí, y solo
+//     lo puede hacer un titular, con un botón que ya es suyo.
+//
+// Antes esta ruta aceptaba el código de la caja y, además de vincular el
+// botón al grupo, volvía titular a quien lo escribía. Así una persona que
+// solo quería meter un botón a su grupo terminaba ocupando uno de los tres
+// lugares de titular de un aparato que nadie le había compartido, y el panel
+// de administración mostraba a gente "compartiendo" botones sin haberlo
+// decidido. Vincular un grupo ya no vuelve titular a nadie.
 router.post("/:id/devices/claim", userAuth, async (req, res) => {
   const membresia = await buscarMembresia(req.user.id, req.params.id);
   if (!membresia) {
@@ -615,34 +619,26 @@ router.post("/:id/devices/claim", userAuth, async (req, res) => {
     return res.status(400).json({ error: "El nombre del botón puede tener máximo 60 caracteres" });
   }
 
-  let device;
-  if (esTexto(claimCode)) {
-    // Lanza ErrorDeAcceso si el código no sirve o ya se usó tres veces. Que la
-    // cuenta YA sea titular no es error aquí: lo que se está pidiendo es
-    // meter el botón a este grupo, y para eso justamente hay que ser dueño.
-    ({ device } = await volverseTitular({
-      userId: req.user.id,
-      claimCode,
-      siYaEraTitular: "seguir",
-    }));
-  } else if (esTexto(deviceId)) {
-    device = await prisma.device.findUnique({ where: { id: deviceId } });
-    if (!device) {
-      return res.status(404).json({ error: "Ese botón no existe" });
-    }
-  } else {
-    return res.status(400).json({ error: "Falta el código de la caja del botón" });
+  if (!esTexto(deviceId)) {
+    return res.status(400).json({
+      error: esTexto(claimCode)
+        ? "Vincular un botón a un grupo ya no pide el código de la caja: elige uno de tus botones. Para agregar un botón a tu cuenta, captura su código en Códigos."
+        : "Falta elegir el botón",
+    });
   }
 
-  // Vincular un botón a un grupo es decidir a quién le avisa: solo quien lo
-  // compró. Con claimCode esto siempre pasa (acaba de volverse titular); con
-  // deviceId es lo que impide traerse el botón de alguien más.
-  const esTitular = await prisma.deviceHolder.findUnique({
-    where: { deviceId_userId: { deviceId: device.id, userId: req.user.id } },
+  // Solo un titular decide a quién le avisa su botón. Un mismo mensaje si el
+  // botón no existe o si no es tuyo, para no confirmar qué ids son reales.
+  const titularidad = await prisma.deviceHolder.findUnique({
+    where: { deviceId_userId: { deviceId, userId: req.user.id } },
+    include: { device: true },
   });
-  if (!esTitular) {
-    return res.status(403).json({ error: "Solo los titulares de ese botón pueden vincularlo a un grupo" });
+  if (!titularidad) {
+    return res.status(403).json({
+      error: "Ese botón no está vinculado a tu cuenta. Captura el código de su caja en Códigos y vuelve a intentar.",
+    });
   }
+  const device = titularidad.device;
 
   const vinculos = await prisma.deviceGroup.findMany({
     where: { deviceId: device.id },
@@ -687,7 +683,7 @@ router.post("/:id/devices/claim", userAuth, async (req, res) => {
 // Desvincular: lo puede hacer su dueño o el ADMIN del grupo. Solo lo saca de
 // ESTE grupo: si avisa a otros, sigue avisándoles. El botón deja de pertenecer
 // al grupo (por eso hay que hacerlo antes de eliminarlo) y se puede volver a
-// vincular con el mismo código de su caja.
+// vincular desde aquí, mientras siga siendo de alguien de este grupo.
 router.delete("/:id/devices/:deviceId", userAuth, async (req, res) => {
   const membresia = await buscarMembresia(req.user.id, req.params.id);
   if (!membresia) {
