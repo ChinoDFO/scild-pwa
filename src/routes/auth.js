@@ -28,24 +28,53 @@ router.get("/me", userAuth, async (req, res) => {
     include: { group: true },
   });
 
-  // Mensajes sin leer por grupo, para el globito de la lista de grupos.
-  const sinLeer = await Promise.all(
-    memberships.map((m) =>
-      prisma.message.count({
-        where: { groupId: m.groupId, userId: { not: req.user.id }, createdAt: { gt: m.lastReadAt } },
-      })
-    )
-  );
+  // Mensajes y alertas sin leer por grupo, para el globito de la lista de
+  // grupos: una alerta nueva cuenta igual que un mensaje, porque las dos son
+  // conversación del grupo que alguien todavía no vio.
+  const [sinLeerMensajes, sinLeerAlertas] = await Promise.all([
+    Promise.all(
+      memberships.map((m) =>
+        prisma.message.count({
+          where: { groupId: m.groupId, userId: { not: req.user.id }, createdAt: { gt: m.lastReadAt } },
+        })
+      )
+    ),
+    Promise.all(
+      memberships.map((m) =>
+        prisma.alert.count({
+          where: {
+            groupId: m.groupId,
+            createdAt: { gt: m.lastReadAt },
+            OR: [{ createdById: null }, { createdById: { not: req.user.id } }],
+          },
+        })
+      )
+    ),
+  ]);
+  const sinLeer = memberships.map((_, i) => sinLeerMensajes[i] + sinLeerAlertas[i]);
 
-  // Fecha del último mensaje de cada grupo: es lo que sube los chats vivos
-  // hasta arriba de la lista. Una sola consulta agrupada en vez de una por
-  // grupo, que ya son varias con los contadores de arriba.
-  const ultimos = await prisma.message.groupBy({
-    by: ["groupId"],
-    where: { groupId: { in: memberships.map((m) => m.groupId) } },
-    _max: { createdAt: true },
-  });
-  const ultimoPorGrupo = new Map(ultimos.map((u) => [u.groupId, u._max.createdAt]));
+  // Fecha de la última actividad de cada grupo (mensaje o alerta): es lo que
+  // sube los chats vivos hasta arriba de la lista. Una sola consulta agrupada
+  // por tabla en vez de una por grupo, que ya son varias con los contadores
+  // de arriba.
+  const [ultimosMensajes, ultimasAlertas] = await Promise.all([
+    prisma.message.groupBy({
+      by: ["groupId"],
+      where: { groupId: { in: memberships.map((m) => m.groupId) } },
+      _max: { createdAt: true },
+    }),
+    prisma.alert.groupBy({
+      by: ["groupId"],
+      where: { groupId: { in: memberships.map((m) => m.groupId) } },
+      _max: { createdAt: true },
+    }),
+  ]);
+  const ultimoPorGrupo = new Map();
+  for (const u of ultimosMensajes) ultimoPorGrupo.set(u.groupId, u._max.createdAt);
+  for (const a of ultimasAlertas) {
+    const actual = ultimoPorGrupo.get(a.groupId);
+    if (!actual || a._max.createdAt > actual) ultimoPorGrupo.set(a.groupId, a._max.createdAt);
+  }
 
   // Si la cuenta puede alertar. La PWA esconde el botón SOS y el menú de
   // tipos cuando es false, en todos sus grupos.
@@ -62,6 +91,9 @@ router.get("/me", userAuth, async (req, res) => {
     esAdminPlataforma: req.user.isPlatformAdmin,
     // El perfil de la app muestra desde cuándo existe la cuenta.
     creadaEl: req.user.createdAt,
+    // Null: todavía no acepta los Términos y Condiciones / Aviso de
+    // Privacidad vigentes. La app bloquea el uso hasta que acepta.
+    terminosAceptadosEl: req.user.termsAcceptedAt,
     groups: ordenarGrupos(
       memberships.map((m, i) => ({
         id: m.group.id,
@@ -98,6 +130,19 @@ router.patch("/me", userAuth, async (req, res) => {
   });
 
   res.json({ displayName: user.displayName });
+});
+
+// Se llama una sola vez, cuando la persona toca "Acepto" en la pantalla de
+// Términos y Condiciones / Aviso de Privacidad (al registrarse, o al entrar
+// si su cuenta es de antes de que existiera esta pantalla). Guarda solo la
+// fecha: el texto vigente vive en la app, no en la base.
+router.post("/aceptar-terminos", userAuth, async (req, res) => {
+  const user = await prisma.user.update({
+    where: { id: req.user.id },
+    data: { termsAcceptedAt: new Date() },
+  });
+
+  res.json({ terminosAceptadosEl: user.termsAcceptedAt });
 });
 
 // Eliminar la cuenta. Lo pide la ley en varios lados y, aquí, algo más

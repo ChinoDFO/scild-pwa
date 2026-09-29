@@ -180,7 +180,13 @@ router.post("/panic", deviceAuth, async (req, res) => {
   });
 
   for (const alerta of alertas) {
-    emitirAGrupo(alerta.groupId, "alertas:cambio", { groupId: alerta.groupId, alertId: alerta.id });
+    emitirAGrupo(alerta.groupId, "alertas:cambio", {
+      groupId: alerta.groupId,
+      alertId: alerta.id,
+      accion: "creada",
+      createdAt: alerta.createdAt,
+      createdById: null,
+    });
 
     // El push se manda DESPUÉS de responder: el ESP32 corre con batería y un
     // timeout corto, no puede quedarse esperando a que FCM conteste. Si esto

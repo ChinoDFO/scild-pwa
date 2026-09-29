@@ -110,7 +110,13 @@ router.post("/", userAuth, async (req, res) => {
   });
 
   res.status(201).json(formatoAlerta(alerta));
-  emitirAGrupo(groupId, "alertas:cambio", { groupId, alertId: alerta.id });
+  emitirAGrupo(groupId, "alertas:cambio", {
+    groupId,
+    alertId: alerta.id,
+    accion: "creada",
+    createdAt: alerta.createdAt,
+    createdById: alerta.createdById,
+  });
 
   // Igual que en /panic: el push va después de responder y no puede tumbar
   // la petición. Si falla, las Notification quedan en PENDING.
@@ -124,8 +130,20 @@ router.post("/", userAuth, async (req, res) => {
 // ACTIVE → ACKNOWLEDGED ("ya voy / ya lo vi") → RESOLVED. Cualquier miembro
 // del grupo puede hacerlo; queda en AuditLog quién fue.
 const TRANSICIONES = {
-  atender: { desde: ["ACTIVE"], a: "ACKNOWLEDGED", campo: "acknowledgedAt", accion: "ALERT_ACKNOWLEDGED" },
-  resolver: { desde: ["ACTIVE", "ACKNOWLEDGED"], a: "RESOLVED", campo: "resolvedAt", accion: "ALERT_RESOLVED" },
+  atender: {
+    desde: ["ACTIVE"],
+    a: "ACKNOWLEDGED",
+    campo: "acknowledgedAt",
+    accion: "ALERT_ACKNOWLEDGED",
+    accionSocket: "atendida",
+  },
+  resolver: {
+    desde: ["ACTIVE", "ACKNOWLEDGED"],
+    a: "RESOLVED",
+    campo: "resolvedAt",
+    accion: "ALERT_RESOLVED",
+    accionSocket: "resuelta",
+  },
 };
 
 router.post("/:id/:accion", userAuth, async (req, res) => {
@@ -178,7 +196,13 @@ router.post("/:id/:accion", userAuth, async (req, res) => {
   }
 
   res.json(formatoAlerta(actualizada));
-  emitirAGrupo(alerta.groupId, "alertas:cambio", { groupId: alerta.groupId, alertId: alerta.id });
+  emitirAGrupo(alerta.groupId, "alertas:cambio", {
+    groupId: alerta.groupId,
+    alertId: alerta.id,
+    accion: transicion.accionSocket,
+    createdAt: actualizada.createdAt,
+    createdById: actualizada.createdById,
+  });
 });
 
 export default router;

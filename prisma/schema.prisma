@@ -63,6 +63,11 @@ model User {
   // la lista de solicitudes de pago y confirma los depósitos. Se prende a
   // mano en la base: no hay forma de dárselo a sí mismo desde la app.
   isPlatformAdmin Boolean  @default(false)
+  // Cuándo aceptó la versión vigente de los Términos y Condiciones / Aviso de
+  // Privacidad. Null = todavía no los ha aceptado (cuenta nueva, o cuenta
+  // vieja de antes de que existiera esta pantalla). La app bloquea el uso
+  // hasta que se acepta.
+  termsAcceptedAt DateTime?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 

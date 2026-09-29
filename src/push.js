@@ -232,8 +232,11 @@ export async function enviarPushDeAlerta(alertId) {
 
   // Las repeticiones van por su cuenta: quien llamó (el ESP32, la PWA) ya
   // tiene su resumen y no se queda esperando a que terminen las tres rondas.
+  // Solo insiste el SOS/botón físico (GENERAL): un "carro sospechoso" avisa
+  // una vez y ya, insistir en algo que no es una emergencia real solo enseña
+  // a la gente a silenciar la app.
   const vivos = tokens.filter((t) => !tokensMuertos.includes(t));
-  if (vivos.length > 0) {
+  if (vivos.length > 0 && alerta.type === "GENERAL") {
     repetirAlerta(alerta, aviso, vivos).catch((e) =>
       console.error(`Fallaron las repeticiones de la alerta ${alertId}:`, e)
     );
