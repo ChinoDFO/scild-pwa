@@ -250,6 +250,45 @@ export async function enviarPushDeAlerta(alertId) {
   };
 }
 
+// El botón sigue presionado (es de los que hay que girar para destrabarlos)
+// y nadie la ha atendido: se le vuelve a avisar a TODOS los que ya se le
+// habían avisado, no solo a los que se quedaron en PENDING —a diferencia de
+// enviarPushDeAlerta, aquí no importa si su aviso anterior ya se marcó
+// SENT, este es un aviso nuevo—. Mismo tag+renotify de siempre, así que
+// vuelve a sonar/vibrar sin que la PWA tenga que hacer nada distinto. No
+// toca Notification: esa tabla es "se le avisó de esta alerta sí o no", y
+// eso ya quedó resuelto la primera vez; esto es solo una repetición.
+// Quien llama (el heartbeat del botón) no debe fallar porque esto falle.
+export async function enviarRecordatorioDeAlertaSostenida(alertId) {
+  const alerta = await prisma.alert.findUnique({
+    where: { id: alertId },
+    include: {
+      group: { select: { name: true } },
+      device: { select: { name: true, deviceCode: true } },
+      createdBy: { select: { email: true, displayName: true } },
+      notifications: { include: { user: { select: { pushTokens: true } } } },
+    },
+  });
+
+  // Ya se atendió/resolvió entre heartbeats, o se borró: nada que insistir.
+  if (!alerta || alerta.status !== "ACTIVE") {
+    return { tokens: 0, enviados: 0 };
+  }
+
+  const tokens = alerta.notifications.flatMap((n) => n.user.pushTokens.map((t) => t.token));
+  if (tokens.length === 0) {
+    return { tokens: 0, enviados: 0 };
+  }
+
+  const aviso = armarAviso(alerta);
+  const respuesta = await firebaseMessaging.sendEachForMulticast(
+    mensajeDeAlerta(alerta, aviso, tokens)
+  );
+  await limpiarTokensMuertos(respuesta, tokens);
+
+  return { tokens: tokens.length, enviados: respuesta.successCount };
+}
+
 // --- Avisos del chat ---------------------------------------------------------
 
 const MAX_VISTA_PREVIA = 120;

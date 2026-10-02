@@ -123,6 +123,21 @@ const unsigned long INTERVALO_WIFI = 3000;
 
 bool botonPresionadoAntes = false;
 
+// ── Botón sostenido ──
+// Este modelo hay que girarlo para destrabarlo, así que después de un
+// botonazo real se queda presionado hasta que alguien lo suelta a mano. Si
+// sigue así pasado UMBRAL_SOSTENIDO, el LED verde empieza a parpadear cada
+// PARPADEO_SOSTENIDO ms —encima de lo que diría setLEDs()— y el heartbeat
+// reporta "presionado" para que el servidor insista con un push cada 15 min
+// mientras nadie lo atienda (ver src/routes/devices.js en el backend). No
+// manda ninguna alerta de más: el botonazo ya se mandó en el flanco de
+// subida, aquí solo se avisa que sigue así.
+unsigned long inicioPresionActual = 0;  // 0 = suelto
+const unsigned long UMBRAL_SOSTENIDO = 60000;         // 1 min
+const unsigned long PARPADEO_SOSTENIDO = 2000;        // medio ciclo del LED
+unsigned long ultimoParpadeoSostenido = 0;
+bool ledSostenidoEncendido = false;
+
 unsigned long inicioSinWifi = 0;
 const unsigned long TIEMPO_MAX_SIN_WIFI = 120000;
 
@@ -204,25 +219,12 @@ void setup() {
 
   setLEDs(false);
 
-  // ── Reset si el botón está presionado al encender ──
-  Serial.println("Mantén presionado el botón para reconfigurar...");
-  delay(3000);
-  if (digitalRead(PIN_BOTON) == LOW) {
-    Serial.println("¡Reset activado!");
-    for (int i = 0; i < 6; i++) {
-      digitalWrite(PIN_LED_ROJO, i % 2 == 0 ? HIGH : LOW);
-      digitalWrite(PIN_LED_VERDE, i % 2 == 0 ? LOW : HIGH);
-      delay(200);
-    }
-    WiFiManager wm;
-    wm.resetSettings();
-    preferences.begin("negocio", false);
-    preferences.clear();
-    preferences.end();
-    Serial.println("Configuración borrada. Reiniciando...");
-    delay(1000);
-    ESP.restart();
-  }
+  // Ya NO hay reset por dejar el botón presionado al encender: con este
+  // modelo (hay que girarlo para destrabarlo) un apagón con el botón todavía
+  // atorado por una emergencia real habría borrado el aparato solo. Para
+  // reconfigurar la red Wi-Fi ahora se usa el botón "Reconfigurar red
+  // Wi-Fi" de la app (ver reconfigurarWifiPrincipal más abajo), que solo
+  // olvida la red y conserva la identidad del botón.
 
   cargarConfiguracion();
 
@@ -392,6 +394,11 @@ void loop() {
   bool botonPresionado = (digitalRead(PIN_BOTON) == LOW);
 
   if (botonPresionado && !botonPresionadoAntes) {
+    // Independiente del cooldown de abajo: aunque este botonazo no genere
+    // alerta nueva (por venir muy seguido de la anterior), el aparato SIGUE
+    // presionado físicamente y eso hay que reportarlo igual.
+    inicioPresionActual = ahora;
+
     if (ahora - ultimaAlerta >= COOLDOWN) {
       ultimaAlerta = ahora;
       Serial.println("🚨 ¡Botón presionado! Enviando alerta...");
@@ -403,10 +410,29 @@ void loop() {
       Serial.println("s");
       parpadearLED(PIN_LED_ROJO, 2, 100);
     }
+  } else if (!botonPresionado && botonPresionadoAntes) {
+    // Se soltó: se acabó el aviso sostenido, vuelva el LED a lo normal.
+    inicioPresionActual = 0;
+    ledSostenidoEncendido = false;
+    setLEDs(internetDisponible);
+  }
+
+  // ── Botón sostenido: parpadeo del verde mientras siga atorado ──
+  if (inicioPresionActual > 0 && (ahora - inicioPresionActual >= UMBRAL_SOSTENIDO)) {
+    if (ahora - ultimoParpadeoSostenido >= PARPADEO_SOSTENIDO) {
+      ultimoParpadeoSostenido = ahora;
+      ledSostenidoEncendido = !ledSostenidoEncendido;
+      digitalWrite(PIN_LED_VERDE, ledSostenidoEncendido ? HIGH : LOW);
+    }
   }
 
   botonPresionadoAntes = botonPresionado;
   delay(50);
+}
+
+// ¿Sigue atorado ahora mismo? Lo que se manda en cada heartbeat.
+bool botonSostenido() {
+  return inicioPresionActual > 0 && (millis() - inicioPresionActual >= UMBRAL_SOSTENIDO);
 }
 
 // ─────────────────────────────────────────────
@@ -529,6 +555,9 @@ void enviarHeartbeat() {
   json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
   json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
   json += "\"fallosInternet\":" + String(fallosInternet) + ",";
+  // Si sigue atorado desde el último botonazo: el servidor lo usa para
+  // insistir con un push cada 15 min mientras nadie lo atienda.
+  json += "\"presionado\":" + String(botonSostenido() ? "true" : "false") + ",";
   // La versión que este aparato ya tiene aplicada. Si coincide con la del
   // servidor, contesta config:null y nos ahorramos el JSON entero.
   json += "\"configVersion\":" + String(configVersion);
@@ -540,6 +569,9 @@ void enviarHeartbeat() {
   if (httpCode == 200) {
     Serial.println("✓ Heartbeat enviado.");
     aplicarConfiguracion(respuesta);
+    if (valorJson(respuesta, "reconfigurarWifi") == "true") {
+      reconfigurarWifiPrincipal();
+    }
   } else {
     Serial.print("✗ Error heartbeat HTTP: ");
     Serial.println(httpCode);
@@ -598,6 +630,42 @@ void aplicarConfiguracion(const String& respuesta) {
     delay(500);
     ESP.restart();
   }
+}
+
+// ─────────────────────────────────────────────
+//  RECONFIGURAR WIFI (pedido desde la app)
+// ─────────────────────────────────────────────
+// Reemplaza dejar el botón presionado al encenderlo. Aquella forma borraba
+// TODO —hasta deviceCode/deviceSecret, con wm.resetSettings() +
+// preferences.clear()— y con un botón que por diseño se queda atorado tras
+// cada emergencia, un apagón en mal momento reiniciaría el aparato con el
+// botón todavía presionado y se autoborraría solo.
+//
+// Esto solo olvida la red PRINCIPAL: se limpia wm.resetSettings() (lo que
+// WiFiManager tiene guardado por su cuenta) y ssid1/pass1 de nuestras propias
+// Preferences, y se reinicia. Al volver a arrancar, ssid1 vacío hace que
+// conectarWiFi() abra el portal directo — la misma ruta que ya existe, sin
+// código nuevo para eso. A propósito NO se toca deviceCode/deviceSecret ni la
+// red de RESPALDO: sigue siendo el mismo botón, vinculado al mismo grupo.
+void reconfigurarWifiPrincipal() {
+  Serial.println("★ La app pidió reconfigurar la red Wi-Fi. Olvidando red principal...");
+
+  for (int i = 0; i < 6; i++) {
+    digitalWrite(PIN_LED_ROJO, i % 2 == 0 ? HIGH : LOW);
+    digitalWrite(PIN_LED_VERDE, i % 2 == 0 ? LOW : HIGH);
+    delay(200);
+  }
+
+  WiFiManager wm;
+  wm.resetSettings();
+
+  ssid1 = "";
+  pass1 = "";
+  guardarConfiguracion(NOMBRE_NEGOCIO, DIRECCION, ssid1, pass1, ssid2, pass2);
+
+  Serial.println("Reiniciando para abrir el portal (busca \"SCILD-CONFIG\")...");
+  delay(500);
+  ESP.restart();
 }
 
 // ─────────────────────────────────────────────

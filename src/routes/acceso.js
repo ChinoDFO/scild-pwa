@@ -235,6 +235,48 @@ router.patch("/botones/:id/config", userAuth, async (req, res) => {
   });
 });
 
+// Reemplaza dejar el botón presionado al encenderlo: eso borraba su red Y su
+// identidad (deviceCode/secret), y con un botón que por diseño se queda
+// atorado hasta que alguien lo destraba a mano, un apagón en mal momento
+// reiniciaría el aparato con el botón todavía presionado y se autoborraría.
+// Esto solo marca el pendiente; el propio ESP32 hace el trabajo —olvidar su
+// red y reiniciar hacia su portal— en cuanto lo ve en su siguiente
+// heartbeat/status (ver src/routes/devices.js). Conserva deviceCode/secret:
+// sigue vinculado al mismo grupo sin tener que volver a capturarlo.
+router.post("/botones/:id/reconfigurar-wifi", userAuth, async (req, res) => {
+  const deviceId = await exigirTitular(req, res);
+  if (!deviceId) return;
+
+  const device = await prisma.$transaction(async (tx) => {
+    const actualizado = await tx.device.update({
+      where: { id: deviceId },
+      data: { wifiResetRequestedAt: new Date() },
+      select: { heartbeatInterval: true },
+    });
+
+    await tx.deviceEvent.create({
+      data: {
+        deviceId,
+        type: "CONFIG_UPDATE",
+        payload: { accion: "wifi_reset_requested", por: req.user.id },
+      },
+    });
+
+    await tx.auditLog.create({
+      data: {
+        userId: req.user.id,
+        action: "DEVICE_WIFI_RESET_REQUESTED",
+        entity: "Device",
+        entityId: deviceId,
+      },
+    });
+
+    return actualizado;
+  });
+
+  res.json({ ok: true, seAplicaEnSegundos: device.heartbeatInterval });
+});
+
 // Vincula esta cuenta a un botón con el código impreso en su caja. El mismo
 // código sirve para tres personas: la casa, no una persona.
 //

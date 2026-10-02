@@ -1,11 +1,58 @@
 import { Router } from "express";
 import prisma from "../prisma.js";
 import { deviceAuth } from "../middleware/deviceAuth.js";
-import { crearNotificacionesPendientes, enviarPushDeAlerta } from "../push.js";
+import {
+  crearNotificacionesPendientes,
+  enviarPushDeAlerta,
+  enviarRecordatorioDeAlertaSostenida,
+} from "../push.js";
 import { emitirAGrupo } from "../realtime.js";
 import { configuracionParaElBoton } from "../configuracionBoton.js";
 
 const router = Router();
+
+// Cada cuánto se repite el push mientras el botón siga presionado y nadie
+// haya atendido la alerta. 15 min: ni tan seguido que se vuelva ruido, ni
+// tan espaciado que una emergencia real se sienta abandonada.
+const RECORDATORIO_SOSTENIDO_MS = 15 * 60 * 1000;
+
+// Lee y limpia en el mismo paso el aviso de "reconfigura tu Wi-Fi" pendiente
+// (ver POST /api/acceso/botones/:id/reconfigurar-wifi): es un mandado de una
+// sola vez, no un ajuste que haya que seguir repitiendo en cada heartbeat.
+async function comandoWifiPendiente(deviceId) {
+  const { count } = await prisma.device.updateMany({
+    where: { id: deviceId, wifiResetRequestedAt: { not: null } },
+    data: { wifiResetRequestedAt: null },
+  });
+  return count > 0;
+}
+
+// El botón manda `presionado` mientras el que se accionó sigue sin destrabar
+// (es de los que hay que girar para soltarlos). Mientras siga así y nadie
+// haya atendido/resuelto la alerta que generó, se insiste cada 15 min —el
+// mismo push, con el mismo tag, así que vuelve a sonar sin que la PWA tenga
+// que hacer nada distinto—. Se corta solo: en cuanto alguien atiende, el
+// filtro `status: "ACTIVE"` deja de encontrarla; en cuanto se suelta, este
+// heartbeat ni manda `presionado: true`.
+async function avisarSiSigueSostenido(deviceId, presionado) {
+  if (presionado !== true) return;
+
+  const activas = await prisma.alert.findMany({
+    where: { deviceId, source: "DEVICE", status: "ACTIVE" },
+    select: { id: true, createdAt: true, lastReminderAt: true },
+  });
+
+  for (const alerta of activas) {
+    const ultimoAviso = (alerta.lastReminderAt ?? alerta.createdAt).getTime();
+    if (Date.now() - ultimoAviso < RECORDATORIO_SOSTENIDO_MS) continue;
+
+    await prisma.alert.update({ where: { id: alerta.id }, data: { lastReminderAt: new Date() } });
+
+    enviarRecordatorioDeAlertaSostenida(alerta.id)
+      .then((r) => console.log(`Recordatorio de ${alerta.id}: ${r.enviados}/${r.tokens} entregados`))
+      .catch((e) => console.error(`No se pudo mandar el recordatorio de ${alerta.id}:`, e));
+  }
+}
 
 // El ESP32 solo puede reportarse a sí mismo como ONLINE o MAINTENANCE.
 // EMERGENCY se activa exclusivamente vía /panic y OFFLINE se infiere por
@@ -68,12 +115,20 @@ router.post("/heartbeat", deviceAuth, async (req, res) => {
 
   // La respuesta del heartbeat es el canal por el que la app configura el
   // botón: el aparato no puede recibir conexiones de fuera (está detrás del
-  // router del cliente), así que los ajustes viajan de vuelta en el mismo
-  // viaje que ya hace cada pocos minutos.
+  // router del cliente), así que los ajustes —y el mandado de reconfigurar
+  // Wi-Fi, si hay uno pendiente— viajan de vuelta en el mismo viaje que ya
+  // hace cada pocos minutos.
+  const reconfigurarWifi = await comandoWifiPendiente(device.id);
+
   res.status(200).json({
     ok: true,
     config: await configuracionPendiente(device.id, req.body?.configVersion),
+    ...(reconfigurarWifi ? { reconfigurarWifi: true } : {}),
   });
+
+  avisarSiSigueSostenido(device.id, req.body?.presionado).catch((e) =>
+    console.error(`No se pudo revisar el recordatorio sostenido de ${device.id}:`, e)
+  );
 });
 
 // Cuántos segundos después de una alerta se considera que lo que llega es el
@@ -225,10 +280,17 @@ router.post("/status", deviceAuth, async (req, res) => {
     }),
   ]);
 
+  const reconfigurarWifi = await comandoWifiPendiente(device.id);
+
   res.status(200).json({
     ok: true,
     config: await configuracionPendiente(device.id, req.body?.configVersion),
+    ...(reconfigurarWifi ? { reconfigurarWifi: true } : {}),
   });
+
+  avisarSiSigueSostenido(device.id, req.body?.presionado).catch((e) =>
+    console.error(`No se pudo revisar el recordatorio sostenido de ${device.id}:`, e)
+  );
 });
 
 export default router;

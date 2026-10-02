@@ -10,13 +10,19 @@
 //   npm run boton:simular -- --code BTN-PRUEBA-01 --secret <deviceSecret>
 //   npm run boton:simular -- --code ... --secret ... --panic
 //   npm run boton:simular -- --code ... --secret ... --cada 30
+//   npm run boton:simular -- --code ... --secret ... --panic
+//   npm run boton:simular -- --code ... --secret ... --sostenido --cada 30
 //
 // Opciones:
-//   --url     backend (por defecto http://localhost:3000)
-//   --panic   dispara una alerta y sale
-//   --cada N  se queda mandando heartbeat cada N segundos (como el aparato)
-//   --rssi N  señal WiFi que reporta (por defecto -58)
-//   --red     nombre de la red que reporta (por defecto "Simulador")
+//   --url        backend (por defecto http://localhost:3000)
+//   --panic      dispara una alerta y sale
+//   --cada N     se queda mandando heartbeat cada N segundos (como el aparato)
+//   --rssi N     señal WiFi que reporta (por defecto -58)
+//   --red        nombre de la red que reporta (por defecto "Simulador")
+//   --sostenido  manda presionado:true en cada heartbeat, como si el botón
+//                siguiera atorado desde el --panic de antes. Sirve para
+//                probar el recordatorio de cada 15 min sin destrabar nada a
+//                mano (el backend lo compara contra Alert.lastReminderAt).
 
 const args = process.argv.slice(2);
 
@@ -33,6 +39,7 @@ const deviceSecret = opcion("secret");
 const rssi = Number(opcion("rssi", -58));
 const redActiva = opcion("red", "Simulador");
 const cada = opcion("cada");
+const sostenido = Boolean(opcion("sostenido"));
 
 if (!deviceCode || !deviceSecret) {
   console.error("Falta --code o --secret. Los trae PRUEBAS.md, o el script que creó el botón.");
@@ -66,6 +73,7 @@ async function heartbeat() {
     ip: "192.168.1.77",
     rssi,
     fallosInternet,
+    presionado: sostenido,
     configVersion,
   });
 
@@ -75,7 +83,9 @@ async function heartbeat() {
     return;
   }
 
-  console.log(`✓ Heartbeat (rssi ${rssi} dBm, red "${redActiva}")`);
+  console.log(
+    `✓ Heartbeat (rssi ${rssi} dBm, red "${redActiva}"${sostenido ? ", presionado" : ""})`
+  );
 
   if (datos.config) {
     configVersion = datos.config.version;
@@ -88,6 +98,10 @@ async function heartbeat() {
       `    red respaldo: ${datos.config.ssidRespaldo || "(ninguna)"}` +
         (datos.config.passRespaldo ? " (con contraseña)" : "")
     );
+  }
+
+  if (datos.reconfigurarWifi) {
+    console.log("  ↓ La app pidió reconfigurar la red Wi-Fi (el firmware real reiniciaría al portal).");
   }
 }
 

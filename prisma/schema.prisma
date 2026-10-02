@@ -165,6 +165,12 @@ model Device {
   rssi              Int?
   // Cuántas veces seguidas el aparato se quedó sin internet teniendo WiFi.
   internetFailures  Int          @default(0)
+  // Alguien pidió desde la app que el botón olvide su red Wi-Fi principal y
+  // vuelva a abrir su portal (reemplaza dejarlo presionado al encenderlo,
+  // que además borraba su identidad). Se entrega en el siguiente
+  // heartbeat/status y se limpia ahí mismo: es un mandado de una sola vez,
+  // no un ajuste persistente como DeviceConfiguration.
+  wifiResetRequestedAt DateTime?
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
 
@@ -278,6 +284,9 @@ model Alert {
   createdAt      DateTime    @default(now())
   acknowledgedAt DateTime?
   resolvedAt     DateTime?
+  // Último "sigue presionado" que se mandó mientras esta alerta seguía
+  // ACTIVE. Null hasta el primero, que se manda a los 15 min de createdAt.
+  lastReminderAt DateTime?
 
   group         Group          @relation(fields: [groupId], references: [id], onDelete: Cascade)
   device        Device?        @relation(fields: [deviceId], references: [id], onDelete: SetNull)
