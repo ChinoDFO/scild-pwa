@@ -607,6 +607,39 @@ Proyecto nuevo: React + TypeScript + Vite + Tailwind v4 + React Router.
 código de caja, administrador de plataforma) y es idempotente. El
 `deviceSecret` solo se imprime al crear el botón.
 
+### Correos de la tienda (scild-web) — 2 de octubre
+
+Los correos de pedidos (nuevo pedido al admin, pedido confirmado y pedido
+cancelado al cliente) salieron de EmailJS en el navegador y ahora los manda
+este backend con **Nodemailer + una cuenta de Gmail** (gratis, ~500/día).
+
+- `POST /api/correos/pedido` con `{ pedidoId, tipo }`, `tipo` = `nuevo` |
+  `confirmado` | `cancelado`. **La petición no trae destinatario ni
+  contenido**: el backend busca el pedido en el Firestore de la tienda, comprueba
+  que de verdad esté en ese estado y manda el correo al `correo` guardado en el
+  pedido (o a `CORREO_ADMIN` en el caso `nuevo`). Así el endpoint no sirve para
+  mandar correos a terceros. Límite: 15 peticiones por minuto por IP.
+- Cada pedido solo recibe una vez cada correo: se reserva con una bandera
+  (`correoNuevoEnviado`, `correoConfirmadoEnviado`, `correoCanceladoEnviado`)
+  dentro de una transacción antes de enviar; si el envío falla se libera para
+  reintentar. El correo `nuevo` solo se acepta dentro de los 15 min siguientes
+  a crear el pedido.
+- La tienda usa **otro proyecto de Firebase** distinto al de la app de
+  emergencia, así que hay una segunda app de Admin (`src/firebasePedidos.js`)
+  con su propia llave. Se inicia hasta que se necesita: si falta, solo fallan
+  los correos (503), el resto del backend arranca normal.
+- Variables nuevas en `.env` (ver `.env.example`): `GMAIL_USER`,
+  `GMAIL_APP_PASSWORD`, `CORREO_ADMIN`, `PEDIDOS_FIREBASE_SERVICE_ACCOUNT_PATH`
+  (por defecto `./firebase-pedidos-service-account.json`, ya en `.gitignore`).
+  Sin `GMAIL_*` no se manda nada: el correo se imprime en la consola.
+- Los textos de los correos están en `src/plantillasCorreo.js` (escapan el
+  HTML porque los datos los escribe el cliente). Son una versión nueva: no son
+  copia de las plantillas de EmailJS.
+- Para que funcione en producción: backend publicado con HTTPS, su `FRONTEND_ORIGIN`
+  incluyendo el dominio de la tienda, y `VITE_API_URL` en Vercel apuntando al
+  backend. Gmail puede mandar a spam al principio; a futuro, pasar a
+  Resend/Brevo con dominio propio.
+
 ## 5. Cómo levantar el proyecto localmente
 
 Necesitas correr backend y frontend al mismo tiempo (dos terminales):

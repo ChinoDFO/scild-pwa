@@ -9,6 +9,7 @@ import notificationsRouter from "./routes/notifications.js";
 import alertsRouter from "./routes/alerts.js";
 import accesoRouter from "./routes/acceso.js";
 import adminRouter from "./routes/admin.js";
+import correosRouter from "./routes/correos.js";
 import { origenesPermitidos } from "./origenes.js";
 
 const app = express();
@@ -35,7 +36,17 @@ const userLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// Los correos de la tienda los dispara cualquier visitante al hacer o cancelar
+// un pedido, sin sesión: límite bajo para que no se use para inundar a nadie.
+const correosLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 15,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 app.use("/api/devices", deviceLimiter, devicesRouter);
+app.use("/api/correos", correosLimiter, correosRouter);
 app.use("/api/auth", userLimiter, authRouter);
 app.use("/api/groups", userLimiter, groupsRouter);
 app.use("/api/notifications", userLimiter, notificationsRouter);
