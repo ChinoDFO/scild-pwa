@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
+    "build": "prisma generate",
+    "correo:probar": "node scripts/probarCorreo.js",
     "device:create": "node scripts/createDevice.js",
     "alert:test": "node scripts/sendTestAlert.js",
     "prisma:generate": "prisma generate",

@@ -14,6 +14,18 @@ import { origenesPermitidos } from "./origenes.js";
 
 const app = express();
 
+// Detrás de un proxy (Render, Cloudflare...) sin esto req.ip sería la IP del
+// proxy para TODOS, y los límites de peticiones de abajo se compartirían entre
+// todos los usuarios y todos los botones. TRUST_PROXY = cuántos saltos de
+// proxy hay delante de la app; en Render son 3 (Cloudflare + balanceadores) y
+// Render pone RENDER=true solo, así que ahí no hay que configurar nada. Con
+// más saltos de los reales, cualquiera podría falsear su IP; con menos, el
+// límite se mezcla entre usuarios. En local no hay proxy: 0.
+const saltosProxy = Number(process.env.TRUST_PROXY ?? (process.env.RENDER ? 3 : 0));
+if (Number.isInteger(saltosProxy) && saltosProxy > 0) {
+  app.set("trust proxy", saltosProxy);
+}
+
 // El ESP32 no manda Origin, así que esto solo afecta a la PWA en el navegador.
 app.use(helmet());
 app.use(cors({ origin: origenesPermitidos }));

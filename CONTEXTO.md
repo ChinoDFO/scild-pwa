@@ -607,11 +607,11 @@ Proyecto nuevo: React + TypeScript + Vite + Tailwind v4 + React Router.
 código de caja, administrador de plataforma) y es idempotente. El
 `deviceSecret` solo se imprime al crear el botón.
 
-### Correos de la tienda (scild-web) — 2 de octubre
+### Correos de la tienda (scild-web) — 2 y 3 de octubre
 
 Los correos de pedidos (nuevo pedido al admin, pedido confirmado y pedido
 cancelado al cliente) salieron de EmailJS en el navegador y ahora los manda
-este backend con **Nodemailer + una cuenta de Gmail** (gratis, ~500/día).
+este backend.
 
 - `POST /api/correos/pedido` con `{ pedidoId, tipo }`, `tipo` = `nuevo` |
   `confirmado` | `cancelado`. **La petición no trae destinatario ni
@@ -626,19 +626,55 @@ este backend con **Nodemailer + una cuenta de Gmail** (gratis, ~500/día).
   a crear el pedido.
 - La tienda usa **otro proyecto de Firebase** distinto al de la app de
   emergencia, así que hay una segunda app de Admin (`src/firebasePedidos.js`)
-  con su propia llave. Se inicia hasta que se necesita: si falta, solo fallan
-  los correos (503), el resto del backend arranca normal.
-- Variables nuevas en `.env` (ver `.env.example`): `GMAIL_USER`,
-  `GMAIL_APP_PASSWORD`, `CORREO_ADMIN`, `PEDIDOS_FIREBASE_SERVICE_ACCOUNT_PATH`
-  (por defecto `./firebase-pedidos-service-account.json`, ya en `.gitignore`).
-  Sin `GMAIL_*` no se manda nada: el correo se imprime en la consola.
-- Los textos de los correos están en `src/plantillasCorreo.js` (escapan el
-  HTML porque los datos los escribe el cliente). Son una versión nueva: no son
-  copia de las plantillas de EmailJS.
-- Para que funcione en producción: backend publicado con HTTPS, su `FRONTEND_ORIGIN`
-  incluyendo el dominio de la tienda, y `VITE_API_URL` en Vercel apuntando al
-  backend. Gmail puede mandar a spam al principio; a futuro, pasar a
-  Resend/Brevo con dominio propio.
+  con su propia llave (`PEDIDOS_FIREBASE_SERVICE_ACCOUNT_PATH`, ya en
+  `.gitignore`). Se inicia hasta que se necesita: si falta, solo fallan los
+  correos (503), el resto del backend arranca normal.
+- **Tres modos de envío** (`src/correo.js`, en este orden de prioridad):
+  1. **Relay** (`CORREO_RELAY_URL` + `CORREO_RELAY_TOKEN`): un Google Apps Script
+     (`scripts/correo-relay.gs`) manda el correo por HTTPS desde el Gmail que lo
+     creó. Gratis, y **es lo único que funciona en Render gratis**, que desde
+     septiembre de 2025 bloquea los puertos SMTP 25, 465 y 587 (los planes de
+     pago sí permiten 465 y 587).
+  2. **SMTP con Gmail** (`GMAIL_USER` + `GMAIL_APP_PASSWORD`, contraseña de
+     aplicación): para local o hosting de pago.
+  3. **Simulado**: sin nada configurado, el correo se imprime en consola.
+
+  `npm run correo:probar -- tu@correo.com` manda un correo de prueba con el
+  modo que tengas configurado (cuidado: manda un correo de verdad a esa
+  dirección).
+- Los textos están en `src/plantillasCorreo.js` (escapan el HTML porque los
+  datos los escribe el cliente). Son una versión nueva: no son copia de las
+  plantillas de EmailJS. Gmail puede mandar a spam al principio; a futuro,
+  pasar a Resend/Brevo con dominio propio.
+
+### Publicación en Render (3 de octubre)
+
+- Servicio web de Node desde este repo (`main`), región **Ohio** (Neon está en
+  us-east-2). Build: `npm ci --include=dev && npm run build` (`prisma` es
+  devDependency y el build corre `prisma generate`). Start: `npm start`.
+  Health check: `/health`. Node: el que Render dé por defecto (24.x).
+- Variables: `DATABASE_URL` (conviene agregarle `&connect_timeout=30`),
+  `FRONTEND_ORIGIN` (dominio de la tienda con https y sin barra final; con ella
+  puesta localhost deja de estar permitido), `CORREO_RELAY_URL`,
+  `CORREO_RELAY_TOKEN`, `CORREO_ADMIN`,
+  `FIREBASE_SERVICE_ACCOUNT_PATH=/etc/secrets/firebase-service-account.json` y
+  `PEDIDOS_FIREBASE_SERVICE_ACCOUNT_PATH=/etc/secrets/firebase-pedidos-service-account.json`.
+  Las dos llaves se suben como **Secret Files** con esos mismos nombres.
+- `TRUST_PROXY`: en Render se detecta solo (`RENDER=true` -> 3 saltos: Cloudflare
+  + balanceadores). Sin eso `req.ip` sería el del proxy para todos y los límites
+  de peticiones (botones incluidos) se compartirían entre todos.
+- Solo se publica lo que está **commiteado**, y Render redespliega solo con
+  cada push a `main`. Al 3 de octubre la base de Neon ya tenía aplicadas todas
+  las migraciones del repo (`prisma migrate status` -> "up to date"). Con una
+  migración nueva: aplicarla en Neon (`prisma migrate deploy`) **antes** del
+  push, o el código nuevo arranca contra una base sin esas columnas.
+- El plan gratis duerme el servicio tras 15 min sin tráfico (el primer
+  request tarda ~1 min). Para los correos no importa; para los botones sí: a
+  esa altura pasar a un plan de pago.
+- Cuidado en Windows: **no correr `npm ci`** con el backend en marcha. Borra
+  `node_modules` antes de instalar y el DLL de Prisma está bloqueado, así que
+  falla a la mitad y deja las dependencias rotas. Si pasa: `npm install` y luego
+  `npx prisma generate`.
 
 ## 5. Cómo levantar el proyecto localmente
 
@@ -740,7 +776,7 @@ la Ayuda seguía explicando el sistema viejo (dos titulares, diez lugares
 por botón).
 En orden sugerido:
 
-1. **Publicar con HTTPS (deploy).** Es lo que desbloquea todo lo demás: sin
+1. **Publicar con HTTPS (deploy).** *(En curso: backend en Render desde el 3 de octubre, ver arriba.)* Es lo que desbloquea todo lo demás: sin
    HTTPS no hay push ni instalación en celulares (solo funcionan en
    `localhost`), el ESP32 necesita un backend público al que llamar, y el
    tutorial de `scild-web` necesita una URL real a la cual mandar. Opción
