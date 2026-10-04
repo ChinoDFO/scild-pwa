@@ -40,15 +40,32 @@ async function enviarPorRelay({ para, asunto, texto, html }) {
     signal: AbortSignal.timeout(30_000),
   });
 
-  const datos = await respuesta.json().catch(() => null);
-  if (!respuesta.ok || !datos?.ok) {
-    throw new Error(
-      datos?.error
-        ? `El relay de correo respondió: ${datos.error}`
-        : `El relay de correo no contestó lo esperado (HTTP ${respuesta.status}). ` +
-            `¿La implementación de Apps Script está en "Cualquier persona" y la URL termina en /exec?`
-    );
+  const crudo = await respuesta.text();
+  let datos = null;
+  try {
+    datos = JSON.parse(crudo);
+  } catch {
+    // no era JSON: casi seguro es una página de Google (login o error)
   }
+
+  if (respuesta.ok && datos?.ok) return;
+  if (datos?.error) throw new Error(`El relay de correo respondió: ${datos.error}`);
+
+  let pista;
+  if (respuesta.status === 401 || respuesta.status === 403) {
+    pista =
+      'Google está pidiendo iniciar sesión: en la implementación de Apps Script, "Quién tiene acceso" ' +
+      'debe ser "Cualquier persona" y "Ejecutar como" debe ser "Yo".';
+  } else if (/doPost/i.test(crudo)) {
+    pista =
+      "Al script de Apps Script le falta la función doPost: pega el código completo de " +
+      "scripts/correo-relay.gs y publica una versión nueva de la implementación.";
+  } else {
+    pista =
+      "Revisa que la URL sea la de la implementación (termina en /exec) y que hayas publicado " +
+      "una versión nueva después de cambiar el código.";
+  }
+  throw new Error(`El relay de correo no contestó lo esperado (HTTP ${respuesta.status}). ${pista}`);
 }
 
 export async function enviarCorreo({ para, asunto, texto, html }) {

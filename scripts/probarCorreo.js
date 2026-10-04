@@ -25,5 +25,7 @@ try {
   );
 } catch (err) {
   console.error("Falló el envío:", err.message);
-  process.exit(1);
+  // exitCode y no process.exit(): en Windows salir de golpe con una petición
+  // cerrándose imprime un "Assertion failed" de libuv que asusta sin ser nada.
+  process.exitCode = 1;
 }

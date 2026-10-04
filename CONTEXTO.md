@@ -634,7 +634,14 @@ este backend.
      (`scripts/correo-relay.gs`) manda el correo por HTTPS desde el Gmail que lo
      creó. Gratis, y **es lo único que funciona en Render gratis**, que desde
      septiembre de 2025 bloquea los puertos SMTP 25, 465 y 587 (los planes de
-     pago sí permiten 465 y 587).
+     pago sí permiten 465 y 587). Si falla: **HTTP 401** = la implementación
+     de Apps Script no está en "Quién tiene acceso: Cualquier persona" (o no
+     está en "Ejecutar como: Yo"); "falta la función doPost" = el script no
+     tiene el código completo de `scripts/correo-relay.gs`; tras cambiar el
+     código hay que publicar una **versión nueva** de la implementación. Abrir
+     la URL `/exec` en incógnito debe decir "Relay de SCILD activo". Las
+     variables `CORREO_RELAY_URL` y `CORREO_RELAY_TOKEN` van solo en el `.env`
+     (y en Render), nunca dentro del script de Google.
   2. **SMTP con Gmail** (`GMAIL_USER` + `GMAIL_APP_PASSWORD`, contraseña de
      aplicación): para local o hosting de pago.
   3. **Simulado**: sin nada configurado, el correo se imprime en consola.
