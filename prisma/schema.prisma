@@ -340,6 +340,10 @@ model Message {
   user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([groupId, createdAt])
+  // Para la limpieza diaria (ver src/limpieza.js): borra por antigüedad sin
+  // importar el grupo, así que el índice de arriba (que arranca en groupId)
+  // no le sirve de nada a ese filtro.
+  @@index([createdAt])
 }
 
 model AuditLog {

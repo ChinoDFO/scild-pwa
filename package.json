@@ -17,6 +17,7 @@
     "pruebas:preparar": "node scripts/prepararPruebas.js",
     "boton:simular": "node scripts/simularBoton.js",
     "grupos:limpiar": "node scripts/limpiarGruposVacios.js",
+    "mensajes:limpiar": "node scripts/limpiarMensajesViejos.js",
     "cuentas:wipe": "node scripts/wipeCuentas.js"
   },
   "dependencies": {

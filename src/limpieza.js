@@ -31,3 +31,22 @@ export async function borrarGruposVacios() {
 
   return { borrados: borrables, conservados: conBotones };
 }
+
+// Borra los mensajes de chat más viejos que RETENCION_MENSAJES_DIAS.
+//
+// Esto NO toca el historial de alertas: Alert y AuditLog son tablas aparte
+// (ver schema.prisma) y se quedan para siempre a propósito —es lo que
+// permite reconstruir qué pasó en una emergencia—. Lo que se borra es
+// plática común y corriente que ya nadie va a leer.
+//
+// Lo que de verdad ahorra esto es espacio en la base (Neon, plan gratis, con
+// tope de almacenamiento), no RAM del servidor: el backend nunca carga el
+// historial completo de un grupo a memoria, solo pide páginas chicas cuando
+// alguien abre el chat.
+const RETENCION_MENSAJES_DIAS = 90;
+
+export async function borrarMensajesViejos() {
+  const limite = new Date(Date.now() - RETENCION_MENSAJES_DIAS * 24 * 60 * 60 * 1000);
+  const { count } = await prisma.message.deleteMany({ where: { createdAt: { lt: limite } } });
+  return { borrados: count, limite };
+}
