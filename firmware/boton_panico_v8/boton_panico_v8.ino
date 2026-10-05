@@ -66,7 +66,7 @@
 //  SERVIDOR
 // ─────────────────────────────────────────────
 // La misma URL que usa la app (VITE_API_URL), sin la barra final.
-const char* API_URL = "http://192.168.20.111:3000";
+const char* API_URL = "https://scild-pwa.onrender.com";
 
 // Identidad de fábrica de ESTA unidad. Vive en `credenciales.h`, un archivo
 // de esta misma carpeta que git NO sube: el secreto del botón no debe
