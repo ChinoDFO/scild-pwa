@@ -30,6 +30,13 @@ const RONDAS_DE_ALERTA = 3;
 const ESPERA_ENTRE_RONDAS_MS = 4_000;
 const VIBRACION_ALERTA = [300, 150, 300, 150, 300];
 
+// Cada cuánto se insiste con una alerta activa que nadie ha atendido. 15 min:
+// ni tan seguido que se vuelva ruido, ni tan espaciado que una emergencia real
+// se sienta abandonada. La usan tanto el heartbeat del botón físico (devices.js,
+// mientras siga atorado) como la revisión periódica de abajo (cualquier alerta
+// GENERAL activa, tenga botón o no).
+export const RECORDATORIO_SOSTENIDO_MS = 15 * 60 * 1000;
+
 const esperar = (ms) => new Promise((seguir) => setTimeout(seguir, ms));
 
 // El mensaje que se manda a FCM, idéntico en todas las rondas.
@@ -65,6 +72,10 @@ function mensajeDeAlerta(alerta, aviso, tokens) {
         vibrate: VIBRACION_ALERTA,
         // PNG: Android no muestra SVG en notificaciones.
         icon: "/pwa-192x192.png",
+        // El ícono chiquito monocromo que Android pone en la barra de estado
+        // ANTES de desplegar la notificación: se nota sin ni siquiera abrir
+        // el centro de notificaciones.
+        badge: "/pwa-192x192.png",
         // Atender desde la notificación: abre la app ya con la alerta
         // marcada como "voy en camino" (lo resuelve la pantalla del grupo).
         actions: [{ action: "atender", title: "Ya voy" }],
@@ -287,6 +298,34 @@ export async function enviarRecordatorioDeAlertaSostenida(alertId) {
   await limpiarTokensMuertos(respuesta, tokens);
 
   return { tokens: tokens.length, enviados: respuesta.successCount };
+}
+
+// Insiste con TODA alerta GENERAL activa que lleve 15+ min sin atenderse, sin
+// importar si tiene botón físico o no.
+//
+// avisarSiSigueSostenido (devices.js) solo revisa, en cada heartbeat, las
+// alertas de SU botón mientras siga físicamente atorado — un SOS mandado a
+// mano desde la app no tiene aparato ni heartbeat que lo revise, así que sin
+// esto se quedaba mudo para siempre después de las 3 rondas iniciales (~8s)
+// aunque nadie lo hubiera atendido. Se llama sola cada minuto desde
+// server.js; un botón que ya fue revisado por su propio heartbeat hace unos
+// segundos simplemente se salta aquí (lastReminderAt todavía está reciente).
+export async function revisarAlertasSinAtender() {
+  const activas = await prisma.alert.findMany({
+    where: { status: "ACTIVE", type: "GENERAL" },
+    select: { id: true, createdAt: true, lastReminderAt: true },
+  });
+
+  for (const alerta of activas) {
+    const ultimoAviso = (alerta.lastReminderAt ?? alerta.createdAt).getTime();
+    if (Date.now() - ultimoAviso < RECORDATORIO_SOSTENIDO_MS) continue;
+
+    await prisma.alert.update({ where: { id: alerta.id }, data: { lastReminderAt: new Date() } });
+
+    enviarRecordatorioDeAlertaSostenida(alerta.id)
+      .then((r) => console.log(`Recordatorio periódico de ${alerta.id}: ${r.enviados}/${r.tokens} entregados`))
+      .catch((e) => console.error(`No se pudo mandar el recordatorio periódico de ${alerta.id}:`, e));
+  }
 }
 
 // --- Avisos del chat ---------------------------------------------------------

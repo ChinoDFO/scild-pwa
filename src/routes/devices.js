@@ -5,16 +5,12 @@ import {
   crearNotificacionesPendientes,
   enviarPushDeAlerta,
   enviarRecordatorioDeAlertaSostenida,
+  RECORDATORIO_SOSTENIDO_MS,
 } from "../push.js";
 import { emitirAGrupo } from "../realtime.js";
 import { configuracionParaElBoton } from "../configuracionBoton.js";
 
 const router = Router();
-
-// Cada cuánto se repite el push mientras el botón siga presionado y nadie
-// haya atendido la alerta. 15 min: ni tan seguido que se vuelva ruido, ni
-// tan espaciado que una emergencia real se sienta abandonada.
-const RECORDATORIO_SOSTENIDO_MS = 15 * 60 * 1000;
 
 // Lee y limpia en el mismo paso el aviso de "reconfigura tu Wi-Fi" pendiente
 // (ver POST /api/acceso/botones/:id/reconfigurar-wifi): es un mandado de una
