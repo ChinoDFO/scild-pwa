@@ -69,12 +69,26 @@ directo con los usuarios; todo pasa por el backend.
 | `scild-backend` | Backend del sistema de emergencia (este repo) | `PP/scild-backend` | https://github.com/ChinoDFO/scild-pwa |
 | `scild-emergencia` | Frontend del sistema de emergencia (PWA instalable) | `PP/scild-emergencia` | https://github.com/ChinoDFO/scild-emergencia |
 
+Publicado: backend en Render (`https://scild-pwa.onrender.com`), PWA en
+Vercel (`https://scild-emergencia.vercel.app`), `scild-web` en Vercel
+(`https://scild-web.vercel.app`). El empaquetado como app de Android (TWA)
+vive dentro de `scild-emergencia`, carpeta `android/`, en la rama
+`twa-android` (no en `main` todavía).
+
 ## 4. Qué ya funciona (implementado y probado)
 
 **Hito (2026-09-17): el flujo central funciona de punta a punta.** Una alerta
 creada en el backend llegó como notificación push real a la PWA en Chrome
 (Windows), con la app abierta y con la app cerrada. Para el flujo completo
 faltan el ESP32 físico real y tener todo publicado con HTTPS (ver roadmap).
+
+**Hito (2026-10-05): todo publicado y el botón físico real confirmado.**
+`scild-backend` vive en Render, `scild-emergencia` (la PWA) y `scild-web` en
+Vercel. `BTN-003` —un ESP32 real, no el simulador— manda heartbeats cada 60s
+sin un solo hueco contra el backend en producción: se confirmó leyendo
+`DeviceEvent` directo en Neon, no solo el Serial del aparato. Ya no falta
+nada de lo que pedía el hito anterior. Lo que sigue, en curso: empaquetar la
+PWA como app de Android (ver "Android — TWA" más abajo).
 
 ### Backend (`scild-backend`)
 
@@ -355,6 +369,40 @@ faltan el ESP32 físico real y tener todo publicado con HTTPS (ver roadmap).
     alarma tipo sísmica hay que envolver la PWA en una app nativa
     (Capacitor) y mandar el bloque `android.notification.channelId`.
   - Ícono PNG (`/pwa-192x192.png`; Android no muestra SVG).
+  - **Actualización (5 de octubre):** `badge` agregado al aviso de alerta (el
+    ícono chiquito monocromo que Android pone en la barra de estado, antes de
+    desplegar la notificación). Y se cerró un hueco real: el recordatorio de
+    cada 15 min a una alerta sin atender (`RECORDATORIO_SOSTENIDO_MS`, antes
+    `avisarSiSigueSostenido` en `devices.js`) solo se disparaba desde el
+    heartbeat de un botón físico que seguía atorado. Un SOS mandado a mano
+    desde la app (sin aparato) se quedaba mudo para siempre después de las 3
+    rondas iniciales (~8s) si nadie la atendía. Ahora `revisarAlertasSinAtender`
+    (`src/push.js`) corre sola cada minuto desde `server.js` e insiste con
+    *cualquier* alerta GENERAL activa, tenga botón o no. Efecto secundario a
+    propósito: un botón que ya se soltó pero nadie resolvió su alerta también
+    sigue insistiendo ahora (antes solo insistía mientras seguía
+    físicamente presionado).
+- **Limpieza de mensajes viejos (`src/limpieza.js`, 5 de octubre):**
+  `borrarMensajesViejos()` borra los mensajes del chat con más de 90 días
+  (`RETENCION_MENSAJES_DIAS`), corre sola al arrancar y luego cada 24h, y
+  también a mano con `npm run mensajes:limpiar`. **No toca** `Alert` ni
+  `AuditLog` (tablas aparte, se quedan para siempre a propósito: es lo que
+  deja reconstruir qué pasó en una emergencia). El índice `Message_createdAt_idx`
+  (migración `indice_mensajes_por_fecha`) evita que ese borrado recorra toda
+  la tabla — **falta correr `npx prisma migrate deploy` en Neon**, el
+  clasificador de modo automático bloqueó hacerlo desde la sesión que lo
+  armó (cambio de esquema en producción). El borrado funciona igual sin el
+  índice, solo más lento según crezca la tabla.
+- **Firmware apuntando a producción (5 de octubre):** `API_URL` en
+  `firmware/boton_panico_v8/boton_panico_v8.ino` ya no es la IP local de
+  desarrollo, es `https://scild-pwa.onrender.com`. El código ya traía
+  soporte HTTPS listo (`WiFiClientSecure` con `setInsecure()`, decisión ya
+  documentada en esa misma línea) — no hizo falta tocar nada más del sketch.
+  Pendiente real, no de este cambio: el plan gratis de Render duerme a los 15
+  min sin tráfico y el botón solo reintenta ~55s en total, al límite de
+  alcanzar a despertarlo. No es grave en pruebas, pero antes de instalar un
+  botón de verdad hay que resolverlo (plan de pago, o que el heartbeat lo
+  mantenga despierto) — ver roadmap punto 5.
 - Seguridad: Helmet, rate limiting (30 req/min dispositivos, 120 req/min
   usuarios) y CORS:
   - **Producción**: define `FRONTEND_ORIGIN` (separado por comas si son
@@ -454,6 +502,13 @@ Proyecto nuevo: React + TypeScript + Vite + Tailwind v4 + React Router.
   pantalla: una pregunta con `pendiente: true` sale con el aviso de que
   falta escribirla, y `CONTACTO` es donde van el teléfono y el correo de
   soporte cuando se definan.
+  - **Actualización (5 de octubre):** la pregunta "No me llegan las
+    notificaciones" ahora explica el administrador de batería de
+    Xiaomi/Huawei/Oppo/Vivo — una causa común en Android que no tiene nada
+    que ver con el permiso de notificaciones ni con la PWA: esas marcas
+    traen su propio administrador, aparte del de Android, que puede cerrar
+    Chrome en segundo plano sin avisar y así cortar las alertas en
+    silencio.
 - `pages/Grupo.tsx` — **una sola pantalla al estilo de una app de
   mensajería** (parecida a WhatsApp en la forma de usarse), con el mismo
   lenguaje que el resto de la app: variables del tema, trazo grueso,
@@ -654,6 +709,30 @@ este backend.
   plantillas de EmailJS. Gmail puede mandar a spam al principio; a futuro,
   pasar a Resend/Brevo con dominio propio.
 
+### Tutorial de instalación e imágenes en `scild-web` (5 de octubre)
+
+- **Nueva opción "Instalar la app"** en el menú "Gestionar pedidos"
+  (`components/MenuGestion.jsx`), que abre en pestaña nueva
+  `src/pages/InstalarApp.jsx` (ruta `/instalar-app`): pasos para instalar la
+  PWA en Android/iPhone/computadora y, al final, un botón que lleva a la PWA
+  real (`https://scild-emergencia.vercel.app`) — ahí es donde el navegador
+  ofrece instalar de verdad, no se puede disparar ese prompt desde el origen
+  de `scild-web`.
+- La PWA (`Configuracion.tsx` → "Página web", `Login.tsx` → "Pide uno en
+  nuestra web") ya no apunta a `scild.mx` (dominio sin publicar, no
+  resuelve): ahora usa `VITE_WEB_URL=https://scild-web.vercel.app`, nuevo en
+  `.env`/`.env.example`/`.env.production` de `scild-emergencia`.
+- Imágenes de la portada (`Landing.jsx`) renovadas: `robo.jpeg`/`alarma.jpeg`
+  (fotos con fondo) se reemplazaron por capturas reales de la app sin fondo
+  (`notificaciones-sin-fondo.png`→ luego `pantalla-de-alertas.png`, y
+  `boton-panico-sin-fondo.png`). El recuadro que las contiene
+  (`.landing-bloque-media` en `Landing.css`) tenía fondo negro puro
+  (`--paper`) distinto al gris de la tarjeta (`--surface`) — con PNG
+  transparentes de verdad eso se notaba como un borde. Se igualó al color de
+  la tarjeta. El texto de esa sección ("Los robos no avisan" → "Las
+  emergencias no avisan") también se generalizó: la imagen nueva muestra
+  varios tipos de alerta, no solo robos.
+
 ### Publicación en Render (3 de octubre)
 
 - Servicio web de Node desde este repo (`main`), región **Ohio** (Neon está en
@@ -682,6 +761,113 @@ este backend.
   `node_modules` antes de instalar y el DLL de Prisma está bloqueado, así que
   falla a la mitad y deja las dependencias rotas. Si pasa: `npm install` y luego
   `npx prisma generate`.
+
+### Publicación de la PWA (`scild-emergencia`) en Vercel (4 de octubre)
+
+- Vive en **https://scild-emergencia.vercel.app**, importado del mismo modo
+  que `scild-web` (Vercel detecta Vite solo). `vercel.json` trae el mismo
+  rewrite de SPA que `scild-web`, más una regla para que el navegador NO
+  guarde en caché `sw.js` por mucho tiempo — sin eso, `registerType:
+  'autoUpdate'` no sirve de nada: la gente se queda atascada en una versión
+  vieja del service worker.
+- **`.env.production`, a propósito SÍ se commitea** (a diferencia de `.env`):
+  son los mismos valores públicos de Firebase (no son secretos, lo dice el
+  propio `.env.example`) más `VITE_API_URL=https://scild-pwa.onrender.com`.
+  Así Vercel no necesita que nadie le configure variables de entorno a mano —
+  Vite las toma solas al hacer `npm run build`.
+- **`FRONTEND_ORIGIN` en Render ahora trae DOS orígenes**, separados por
+  coma: `https://scild-emergencia.vercel.app,https://scild-web.vercel.app`.
+  **El orden importa**: `src/push.js` usa el PRIMER valor de esa lista como
+  destino al tocar una notificación push (`frontend()`), así que la PWA debe
+  ir primero. `scild-web` sigue necesitando estar en la lista porque le pega
+  al endpoint de correos de pedidos (`/api/correos/pedido`) desde el
+  navegador.
+- Dominio agregado a los **Authorized domains** de Firebase Auth (proyecto
+  `scild-emergencia`) — aunque en la práctica esto pesa más para
+  OAuth/enlaces de acción (recuperar contraseña) que para el login normal de
+  correo/contraseña.
+- Verificado con el navegador apuntando a la URL real: Service Worker
+  `activated`, login carga sin errores de consola, y un `curl` con distintos
+  `Origin` confirmó que el CORS del backend ya acepta la PWA y sigue
+  aceptando `scild-web`.
+
+### Android — empaquetado como TWA (rama `twa-android`, en curso)
+
+**Por qué:** una Trusted Web Activity empaqueta la PWA que ya existe (mismo
+código, sin reescribir nada) como un `.apk`/`.aab` real para Play Store.
+Entre otras cosas, es el único camino para notificaciones con canal propio
+de Android (sonido de alarma, saltarse el modo silencio) — algo que una PWA
+pura no puede hacer nunca, ni instalada: el sonido de notificación lo decide
+el canal único que Chrome usa para todos los sitios.
+
+**Todo el trabajo vive en la rama `twa-android` de `scild-emergencia`, NO en
+`main`**, a propósito: tocar `assetlinks.json` en el dominio real es el único
+paso de esto que sí afecta producción, y el usuario pidió no hacerlo todavía.
+
+- Proyecto generado con **Bubblewrap** (`@bubblewrap/cli`/`core`), apuntando
+  a `https://scild-emergencia.vercel.app/manifest.webmanifest`. Vive en
+  `scild-emergencia/android/`.
+  - `packageId`: `com.scild.emergencia`.
+  - `enableNotifications: true` en `twa-manifest.json` → genera
+    `DelegationService` en el `AndroidManifest.xml`: delega las
+    notificaciones al sistema nativo de Android. No es todavía el canal con
+    sonido de alarma (eso pide código Kotlin aparte, ver roadmap), pero es
+    un paso real hacia allá.
+  - `android/assetlinks.json` ya está generado con la huella SHA-256 real
+    del keystore, listo para publicarse en
+    `https://scild-emergencia.vercel.app/.well-known/assetlinks.json` — pero
+    **todavía no se publicó**. Sin ese archivo en el dominio, el APK instalado
+    abre con la barra de direcciones de Chrome visible (no se ve 100%
+    nativo); publicarlo es lo que falta para que abra "trusted" de verdad.
+  - `android/android.keystore` + `android/keystore-secrets.txt` — **NUNCA
+    se suben a git** (en `android/.gitignore`), igual que
+    `firebase-service-account.json`. Perder el keystore es irreversible: no
+    se puede volver a actualizar la app en Play Store con la misma
+    identidad. Las contraseñas se le dieron al usuario en chat para que las
+    respalde aparte (gestor de contraseñas).
+  - **Build verificado localmente**: `assembleRelease` y `bundleRelease`
+    corren limpio, el `.apk` y el `.aab` quedan firmados con la llave real.
+    El `.apk` firmado se le mandó al usuario para instalar en un celular de
+    verdad.
+- **Cosas que costaron tiempo armar esto** (por si hay que repetirlo o
+  tocarlo):
+  - El CLI de Bubblewrap es **interactivo y no funciona bien con stdin no
+    interactivo** (truena con `ERR_USE_AFTER_CLOSE` al segundo prompt). La
+    config de primera vez (rutas de JDK/Android SDK) se puede escribir a
+    mano en `~/.bubblewrap/config.json` para saltarse el asistente.
+  - El SDK de Android instalado aquí (de Android Studio) **no trae
+    `cmdline-tools`**, así que le falta `tools/`o`bin/` en la raíz (Bubblewrap
+    lo exige para validar la ruta) y le falta exactamente la versión de
+    build-tools que Bubblewrap tiene hardcodeada (`36.1.0`, y aquí solo había
+    `36.0.0`/`35.0.0`). Se resolvió creando una carpeta `bin/` vacía en la
+    raíz del SDK y copiando `build-tools/36.0.0` como `build-tools/36.1.0`
+    (son compatibles para zipalign/apksigner).
+  - **PKCS12** (el tipo de keystore por default desde el JDK 9) en la
+    práctica **exige que la contraseña de la llave sea la misma que la del
+    keystore**. Con contraseñas distintas, `keytool` genera el archivo sin
+    quejarse, pero `apksigner`/`jarsigner` truenan después con "Given final
+    block not properly padded" — se ve como contraseña equivocada, pero el
+    password SÍ era el correcto.
+  - El propio `bubblewrap build` falla en este entorno invocando
+    `gradlew.bat` (`'gradlew.bat' is not recognized...`) — algo del manejo de
+    subprocesos de esa librería en este Windows/Git Bash específico. Se
+    corrió `./gradlew.bat assembleRelease`/`bundleRelease` directo, y
+    después el firmado a mano con `apksigner.jar`/`jarsigner` (los comandos
+    exactos que usa Bubblewrap por dentro, ver `AndroidSdkTools.js` /
+    `JarSigner.js` del paquete si hay que repetirlo).
+  - `org.gradle.jvmargs` en `gradle.properties` traía `-Xmx1536m` por
+    default; en este entorno el JVM no podía reservar esa memoria para el
+    daemon de Gradle. Se bajó a `-Xmx768m`.
+- **Falta para publicar de verdad:**
+  - Cuenta de Google Play Developer ($25 USD, pago único) — la tiene que
+    crear el usuario, no es algo que se pueda hacer por él.
+  - Ficha de la tienda: ícono, capturas, política de privacidad (no existe
+    todavía), cuestionario de clasificación de contenido.
+  - Publicar `android/assetlinks.json` en el dominio (implica mergear esta
+    rama o al menos ese archivo a donde se publique `scild-emergencia`).
+  - Decidir si se persigue el canal de notificación nativo con sonido de
+    alarma (código Kotlin extra sobre lo que ya generó Bubblewrap) o se deja
+    así por ahora.
 
 ## 5. Cómo levantar el proyecto localmente
 
@@ -783,35 +969,24 @@ la Ayuda seguía explicando el sistema viejo (dos titulares, diez lugares
 por botón).
 En orden sugerido:
 
-1. **Publicar con HTTPS (deploy).** *(En curso: backend en Render desde el 3 de octubre, ver arriba.)* Es lo que desbloquea todo lo demás: sin
-   HTTPS no hay push ni instalación en celulares (solo funcionan en
-   `localhost`), el ESP32 necesita un backend público al que llamar, y el
-   tutorial de `scild-web` necesita una URL real a la cual mandar. Opción
-   propuesta: frontend en **Firebase Hosting** (ya usamos ese proyecto de
-   Firebase; es estático y con HTTPS gratis) y backend en un servicio de
-   Node como **Render** o **Railway**. Pendientes técnicos del deploy:
-   - `firebaseAdmin.js` hoy lee la clave de servicio de un **archivo**; en
-     el hosting conviene leerla de una variable de entorno.
-   - Definir `FRONTEND_ORIGIN` en el backend y `VITE_API_URL` en el build
-     del frontend con las URLs reales.
-   - Agregar el dominio publicado a los dominios autorizados de Firebase
-     Auth.
-   - Los planes gratuitos "duermen" el backend tras un rato sin tráfico, y
-     el primer `/panic` tardaría varios segundos. En emergencias hay que
-     evitarlo (plan que no duerma, o que el heartbeat de los botones lo
-     mantenga despierto).
+1. ~~Publicar con HTTPS (deploy).~~ ✅ Backend en Render (3 de octubre), PWA
+   y `scild-web` en Vercel (4-5 de octubre). Ver "Publicación en Render" y
+   "Publicación de la PWA en Vercel" arriba. Sigue pendiente, no bloqueante:
+   el plan gratis de Render duerme el backend tras 15 min sin tráfico, y el
+   primer `/panic` después de eso tardaría varios segundos — en emergencias
+   conviene evitarlo (plan de pago, o que el heartbeat de los botones lo
+   mantenga despierto).
 2. ~~Vincular botones desde la app~~ ✅ (ver arriba: código de la caja).
    Falta lo que se decida para **grupos de comunidad** (punto 8) y poder
    **rotar el código de la caja** si se filtra (hoy solo se puede cambiar
    a mano en la base).
 3. ~~Firmware real del ESP32~~ ✅ `firmware/boton_panico_v8/` — llama a
    `/api/devices/panic` y `/api/devices/heartbeat` con su
-   `deviceCode`/`deviceSecret`. Falta **probarlo en el aparato**: hasta hoy
-   solo se ha probado con `npm run boton:simular` (ver abajo) y necesita el
-   backend publicado con HTTPS (punto 1) para poder salir del laboratorio.
-4. **Página-tutorial de instalación en `scild-web`** — nueva opción junto
-   a "Gestionar pedidos" que explique cómo instalar esta PWA (necesita la
-   URL publicada, punto 1).
+   `deviceCode`/`deviceSecret`, ya apuntando a producción. ~~Falta probarlo
+   en el aparato~~ ✅ `BTN-003` confirmado mandando heartbeats reales contra
+   Render sin fallar (5 de octubre).
+4. ~~Página-tutorial de instalación en `scild-web`~~ ✅ "Instalar la app" en
+   el menú "Gestionar pedidos" (5 de octubre, ver arriba).
 5. **Confiabilidad de las alertas:**
    - Reintentar las `Notification` que quedaron en `PENDING`/`FAILED` (hoy
      solo se intenta una vez).
@@ -860,6 +1035,14 @@ En orden sugerido:
    `TITULARES_POR_BOTON` es una línea, pero es decisión de producto: cada
    titular más es alguien que puede despertar a todo el grupo.
 
+12. **Publicar la app de Android (TWA)** — el proyecto ya está generado,
+    compilado y firmado en la rama `twa-android` de `scild-emergencia` (ver
+    "Android — empaquetado como TWA" arriba). Falta: cuenta de Google Play
+    Developer (la crea el usuario), ficha de la tienda (capturas, política
+    de privacidad), publicar `assetlinks.json` en el dominio, y decidir si
+    se persigue el canal de notificación nativo con sonido de alarma
+    (necesita código Kotlin aparte sobre lo que generó Bubblewrap).
+
 ## 7. Notas de seguridad para quien se una
 
 - Nunca subir `.env` ni `firebase-service-account.json` a git (ya están en
@@ -875,3 +1058,9 @@ En orden sugerido:
 - El `deviceSecret` que imprime `createDevice.js` solo se muestra una vez
   — si se pierde, hay que rotar el dispositivo (crear uno nuevo), no se
   puede recuperar el valor original.
+- `scild-emergencia/android/android.keystore` y
+  `android/keystore-secrets.txt` (rama `twa-android`) tampoco se suben a
+  git. A diferencia de un `deviceSecret`, este no se puede "rotar": si se
+  pierde, Play Store nunca vuelve a aceptar una actualización firmada con la
+  misma identidad — hay que respaldarlo en un gestor de contraseñas, no
+  solo dejarlo en el disco local.
