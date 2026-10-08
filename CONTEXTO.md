@@ -6,18 +6,26 @@ tener que reconstruir el hilo de conversación completo.
 
 ## ⚠️ PENDIENTE AHORA MISMO (8 de octubre) — leer esto primero
 
-1. **`assetlinks.json` está publicado en producción TEMPORALMENTE**, solo
-   para probar el canal nativo de Android (ver "Android — TWA" más abajo).
-   Se subió directo a `main` de `scild-emergencia` (commit `f74e604`),
-   **fuera de la rama `twa-android`** a propósito, porque era el único
-   archivo que hacía falta tocar en producción para que Chrome verifique la
-   app. **Hay que revertirlo en cuanto se termine de probar:**
-   ```bash
-   cd scild-emergencia
-   git rm public/.well-known/assetlinks.json
-   git commit -m "Revertir: ya se probó el canal nativo del TWA"
-   git push
-   ```
+0. **Ya se revirtió** el `assetlinks.json` de prueba y el código web que
+   detecta la app nativa (commits `c131856` y `30f2c38` en `main` de
+   `scild-emergencia`, revert de `c084b86` y `f74e604`). El push ya se hizo;
+   si Vercel todavía no termina de redesplegar, `assetlinks.json` puede
+   tardar un minuto más en dejar de responder 200. **Antes de seguir,
+   confirma con `curl -I https://scild-emergencia.vercel.app/.well-known/assetlinks.json`
+   que ya da 404.**
+1. **Se descubrió y se arregló un bug real durante la prueba**: el canal
+   nativo mandaba bien la URL con el token (confirmado con logs nativos y
+   Chrome DevTools por USB), pero el código web que lo leía nunca se había
+   desplegado a producción (solo vivía en la rama `twa-android`) — por eso
+   no se registraba. Ya quedó probado que, con ambos códigos desplegados
+   juntos, el token SÍ se registra de principio a fin.
+2. **Bug nuevo, sin resolver**: con el token ya registrado y FCM aceptando
+   el mensaje (`successCount: 1`), la alarma de pantalla completa **no
+   llegó a aparecer en el celular de prueba**. Pendiente de diagnosticar —
+   candidatos: el canal de notificación, permisos de pantalla completa no
+   concedidos en el celular (Android 14+, ver `pedirPermisoPantallaCompleta`
+   en `LauncherActivity`), o algo en `AlertaMessagingService.onMessageReceived`.
+   Retomar con logcat/DevTools por USB (ver sesión anterior para el método).
 2. **Falta correr `npx prisma migrate deploy`** en `scild-backend` con la
    rama `twa-android` (migración `push_token_platform`) — sin esto, el
    backend de esa rama no se puede desplegar (truena toda consulta a
