@@ -6,11 +6,22 @@ const router = Router();
 
 // La PWA registra aquí el token de FCM del navegador en el que está corriendo,
 // justo después de que el usuario concede el permiso de notificaciones.
+//
+// `platform`: "WEB" (default, el navegador) o "ANDROID" (el token nativo de
+// la app empaquetada, que manda LauncherActivity vía ?tokenNativo= — ver
+// services/notificaciones.ts). Separados porque se les manda un mensaje de
+// FCM distinto: a ANDROID le llega "data" puro, directo al
+// AlertaMessagingService nativo, sin pasar por la delegación de Chrome.
+const PLATAFORMAS_VALIDAS = new Set(["WEB", "ANDROID"]);
+
 router.post("/token", userAuth, async (req, res) => {
-  const { token } = req.body ?? {};
+  const { token, platform } = req.body ?? {};
 
   if (typeof token !== "string" || token.trim().length === 0) {
     return res.status(400).json({ error: "Falta el token de notificaciones" });
+  }
+  if (platform !== undefined && !PLATAFORMAS_VALIDAS.has(platform)) {
+    return res.status(400).json({ error: "platform debe ser WEB o ANDROID" });
   }
 
   const userAgent = req.get("user-agent")?.slice(0, 255);
@@ -21,8 +32,8 @@ router.post("/token", userAuth, async (req, res) => {
   // al dueño anterior de la sesión.
   const guardado = await prisma.pushToken.upsert({
     where: { token: token.trim() },
-    update: { userId: req.user.id, userAgent, lastUsedAt: new Date() },
-    create: { token: token.trim(), userId: req.user.id, userAgent },
+    update: { userId: req.user.id, userAgent, lastUsedAt: new Date(), ...(platform ? { platform } : {}) },
+    create: { token: token.trim(), userId: req.user.id, userAgent, platform: platform ?? "WEB" },
   });
 
   res.status(201).json({ ok: true, registradoEn: guardado.lastUsedAt });

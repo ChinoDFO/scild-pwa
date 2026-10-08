@@ -88,9 +88,69 @@ function mensajeDeAlerta(alerta, aviso, tokens) {
   };
 }
 
+// El mensaje para los tokens nativos de la app de Android (ver
+// android/.../AlertaMessagingService.java): puro "data", nunca
+// "notification". Así Android siempre entrega el mensaje al código de la
+// app en vez de dibujarlo solo — es lo que permite que el SOS suene con su
+// propio canal (alarma + pantalla completa) en vez de compartir el canal
+// único que Chrome usa para todo el sitio.
+function mensajeAndroidNativo(alerta, aviso, tokens) {
+  return {
+    tokens,
+    android: { priority: "high" },
+    data: {
+      kind: "alerta",
+      alertId: alerta.id,
+      groupId: alerta.groupId,
+      source: alerta.source,
+      type: alerta.type,
+      createdAt: alerta.createdAt.toISOString(),
+      titulo: aviso.title,
+      cuerpo: aviso.body,
+    },
+  };
+}
+
+// Manda la alerta a TODOS los tokens (web y nativos de Android a la vez, con
+// el formato que le toca a cada uno) y devuelve la lista de tokens y una
+// respuesta combinada con la MISMA forma que da sendEachForMulticast — y en
+// el MISMO ORDEN que `tokensConPlataforma`, aunque por dentro sean dos
+// llamadas a FCM separadas: así el resto del código (marcar Notification
+// como SENT/FAILED emparejando por índice, borrar tokens muertos) seguro
+// sigue apuntando al token correcto sin tener que saber que se partió en dos.
+async function mandarAlerta(alerta, aviso, tokensConPlataforma) {
+  const indicesWeb = [];
+  const indicesAndroid = [];
+  tokensConPlataforma.forEach((t, i) => (t.platform === "ANDROID" ? indicesAndroid : indicesWeb).push(i));
+
+  const tokensWeb = indicesWeb.map((i) => tokensConPlataforma[i].token);
+  const tokensAndroid = indicesAndroid.map((i) => tokensConPlataforma[i].token);
+
+  const [respWeb, respAndroid] = await Promise.all([
+    tokensWeb.length > 0
+      ? firebaseMessaging.sendEachForMulticast(mensajeDeAlerta(alerta, aviso, tokensWeb))
+      : null,
+    tokensAndroid.length > 0
+      ? firebaseMessaging.sendEachForMulticast(mensajeAndroidNativo(alerta, aviso, tokensAndroid))
+      : null,
+  ]);
+
+  const responses = new Array(tokensConPlataforma.length);
+  indicesWeb.forEach((indiceOriginal, j) => (responses[indiceOriginal] = respWeb.responses[j]));
+  indicesAndroid.forEach((indiceOriginal, j) => (responses[indiceOriginal] = respAndroid.responses[j]));
+
+  return {
+    tokens: tokensConPlataforma.map((t) => t.token),
+    respuesta: {
+      responses,
+      successCount: (respWeb?.successCount ?? 0) + (respAndroid?.successCount ?? 0),
+    },
+  };
+}
+
 // Rondas 2 en adelante. Corre por su cuenta (nadie la espera) y revisa el
 // estado de la alerta antes de cada una.
-async function repetirAlerta(alerta, aviso, tokens) {
+async function repetirAlerta(alerta, aviso, tokensConPlataforma) {
   for (let ronda = 2; ronda <= RONDAS_DE_ALERTA; ronda++) {
     await esperar(ESPERA_ENTRE_RONDAS_MS);
 
@@ -100,9 +160,7 @@ async function repetirAlerta(alerta, aviso, tokens) {
     });
     if (actual?.status !== "ACTIVE") return ronda - 1;
 
-    const respuesta = await firebaseMessaging.sendEachForMulticast(
-      mensajeDeAlerta(alerta, aviso, tokens)
-    );
+    const { tokens, respuesta } = await mandarAlerta(alerta, aviso, tokensConPlataforma);
     await limpiarTokensMuertos(respuesta, tokens);
   }
   return RONDAS_DE_ALERTA;
@@ -182,11 +240,11 @@ export async function enviarPushDeAlerta(alertId) {
   // Un usuario puede tener varios navegadores, así que se manda a todos sus
   // tokens y se recuerda a qué Notification corresponde cada uno para poder
   // marcar el estado después.
-  const tokens = [];
+  const tokensConPlataforma = [];
   const notificacionDeToken = [];
   for (const notificacion of alerta.notifications) {
     for (const push of notificacion.user.pushTokens) {
-      tokens.push(push.token);
+      tokensConPlataforma.push({ token: push.token, platform: push.platform });
       notificacionDeToken.push(notificacion.id);
     }
   }
@@ -194,15 +252,13 @@ export async function enviarPushDeAlerta(alertId) {
   // Miembros sin ningún token (nunca activaron notificaciones, o entraron al
   // grupo desde una compu sin permiso) se quedan en PENDING: la alerta les
   // sigue apareciendo dentro de la app, no es un fallo de envío.
-  if (tokens.length === 0) {
+  if (tokensConPlataforma.length === 0) {
     return { tokens: 0, enviadas: 0, fallidas: 0, tokensBorrados: 0 };
   }
 
   const aviso = armarAviso(alerta);
 
-  const respuesta = await firebaseMessaging.sendEachForMulticast(
-    mensajeDeAlerta(alerta, aviso, tokens)
-  );
+  const { tokens, respuesta } = await mandarAlerta(alerta, aviso, tokensConPlataforma);
 
   const idsEntregadas = new Set();
   const idsConFallo = new Set();
@@ -246,7 +302,7 @@ export async function enviarPushDeAlerta(alertId) {
   // Solo insiste el SOS/botón físico (GENERAL): un "carro sospechoso" avisa
   // una vez y ya, insistir en algo que no es una emergencia real solo enseña
   // a la gente a silenciar la app.
-  const vivos = tokens.filter((t) => !tokensMuertos.includes(t));
+  const vivos = tokensConPlataforma.filter((t) => !tokensMuertos.includes(t.token));
   if (vivos.length > 0 && alerta.type === "GENERAL") {
     repetirAlerta(alerta, aviso, vivos).catch((e) =>
       console.error(`Fallaron las repeticiones de la alerta ${alertId}:`, e)
@@ -286,15 +342,15 @@ export async function enviarRecordatorioDeAlertaSostenida(alertId) {
     return { tokens: 0, enviados: 0 };
   }
 
-  const tokens = alerta.notifications.flatMap((n) => n.user.pushTokens.map((t) => t.token));
-  if (tokens.length === 0) {
+  const tokensConPlataforma = alerta.notifications.flatMap((n) =>
+    n.user.pushTokens.map((t) => ({ token: t.token, platform: t.platform }))
+  );
+  if (tokensConPlataforma.length === 0) {
     return { tokens: 0, enviados: 0 };
   }
 
   const aviso = armarAviso(alerta);
-  const respuesta = await firebaseMessaging.sendEachForMulticast(
-    mensajeDeAlerta(alerta, aviso, tokens)
-  );
+  const { tokens, respuesta } = await mandarAlerta(alerta, aviso, tokensConPlataforma);
   await limpiarTokensMuertos(respuesta, tokens);
 
   return { tokens: tokens.length, enviados: respuesta.successCount };
@@ -369,7 +425,11 @@ export async function enviarPushDeMensaje(mensaje) {
     prisma.group.findUnique({ where: { id: groupId }, select: { name: true } }),
     prisma.groupMember.findMany({
       where: { groupId, userId: { not: mensaje.autor.id } },
-      select: { userId: true, lastReadAt: true, user: { select: { pushTokens: { select: { token: true } } } } },
+      select: {
+        userId: true,
+        lastReadAt: true,
+        user: { select: { pushTokens: { select: { token: true, platform: true } } } },
+      },
     }),
     // Una sola consulta para calcular los no leídos de todos: los últimos
     // mensajes del grupo, y para cada quien se cuentan los posteriores a su
@@ -387,8 +447,8 @@ export async function enviarPushDeMensaje(mensaje) {
   const porTexto = new Map();
 
   for (const miembro of miembros) {
-    const tokens = miembro.user.pushTokens.map((t) => t.token);
-    if (tokens.length === 0) continue;
+    const tokensConPlataforma = miembro.user.pushTokens;
+    if (tokensConPlataforma.length === 0) continue;
     if (estaViendoGrupo(miembro.userId, groupId)) continue;
 
     const sinLeer = recientes.filter(
@@ -396,26 +456,43 @@ export async function enviarPushDeMensaje(mensaje) {
     ).length;
 
     const body = cuerpoDeAvisoDeChat(sinLeer, mensaje);
-    porTexto.set(body, [...(porTexto.get(body) ?? []), ...tokens]);
+    porTexto.set(body, [...(porTexto.get(body) ?? []), ...tokensConPlataforma]);
   }
 
+  const titulo = grupo?.name ?? "Mensaje nuevo";
   const personas = [...porTexto.values()].reduce((n, t) => n + t.length, 0);
   let enviados = 0;
-  for (const [body, tokens] of porTexto) {
-    const respuesta = await firebaseMessaging.sendEachForMulticast({
-      tokens,
-      notification: { title: grupo?.name ?? "Mensaje nuevo", body },
-      data: { kind: "chat", groupId, messageId: mensaje.id },
-      webpush: {
-        notification: { tag: `chat-${groupId}`, icon: "/pwa-192x192.png" },
-        fcmOptions: { link: `${frontend()}/grupos/${groupId}` },
-        // Normal y no high: lo urgente es la alerta. Marcar todo como
-        // urgente gasta batería y, peor, le quita significado a la palabra.
-        headers: { Urgency: "normal" },
-      },
-    });
-    enviados += respuesta.successCount;
-    await limpiarTokensMuertos(respuesta, tokens);
+  for (const [body, tokensConPlataforma] of porTexto) {
+    const web = tokensConPlataforma.filter((t) => t.platform !== "ANDROID").map((t) => t.token);
+    const android = tokensConPlataforma.filter((t) => t.platform === "ANDROID").map((t) => t.token);
+
+    const [respWeb, respAndroid] = await Promise.all([
+      web.length > 0
+        ? firebaseMessaging.sendEachForMulticast({
+            tokens: web,
+            notification: { title: titulo, body },
+            data: { kind: "chat", groupId, messageId: mensaje.id },
+            webpush: {
+              notification: { tag: `chat-${groupId}`, icon: "/pwa-192x192.png" },
+              fcmOptions: { link: `${frontend()}/grupos/${groupId}` },
+              // Normal y no high: lo urgente es la alerta. Marcar todo como
+              // urgente gasta batería y, peor, le quita significado a la palabra.
+              headers: { Urgency: "normal" },
+            },
+          })
+        : null,
+      android.length > 0
+        ? firebaseMessaging.sendEachForMulticast({
+            tokens: android,
+            android: { priority: "normal" },
+            data: { kind: "chat", groupId, messageId: mensaje.id, titulo, cuerpo: body },
+          })
+        : null,
+    ]);
+
+    enviados += (respWeb?.successCount ?? 0) + (respAndroid?.successCount ?? 0);
+    if (respWeb) await limpiarTokensMuertos(respWeb, web);
+    if (respAndroid) await limpiarTokensMuertos(respAndroid, android);
   }
 
   return { textos: porTexto.size, tokens: personas, enviados };

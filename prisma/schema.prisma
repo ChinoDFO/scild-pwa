@@ -29,6 +29,15 @@ enum AlertSource {
   APP
 }
 
+// WEB: token de push del navegador (la PWA, instalada o no). ANDROID: token
+// nativo de FCM de la app empaquetada (TWA) — recibe el push directo, sin
+// pasar por la delegación de Chrome, así puede sonar distinto para un SOS.
+// Ver android/app/.../AlertaMessagingService.java y src/push.js.
+enum PushPlatform {
+  WEB
+  ANDROID
+}
+
 enum AlertStatus {
   ACTIVE
   ACKNOWLEDGED
@@ -317,12 +326,13 @@ model Notification {
 // es único: si reaparece bajo otra cuenta (celular compartido) se reasigna al
 // nuevo dueño en vez de duplicarse.
 model PushToken {
-  id         String   @id @default(uuid())
+  id         String       @id @default(uuid())
   userId     String
-  token      String   @unique
+  token      String       @unique
+  platform   PushPlatform @default(WEB)
   userAgent  String?
-  createdAt  DateTime @default(now())
-  lastUsedAt DateTime @default(now())
+  createdAt  DateTime     @default(now())
+  lastUsedAt DateTime     @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
