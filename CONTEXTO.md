@@ -4,6 +4,35 @@ Este documento resume en qué va el proyecto para que cualquiera que se sume
 pueda entender las decisiones tomadas y seguir desde donde se quedó, sin
 tener que reconstruir el hilo de conversación completo.
 
+## ⚠️ PENDIENTE AHORA MISMO (8 de octubre) — leer esto primero
+
+1. **`assetlinks.json` está publicado en producción TEMPORALMENTE**, solo
+   para probar el canal nativo de Android (ver "Android — TWA" más abajo).
+   Se subió directo a `main` de `scild-emergencia` (commit `f74e604`),
+   **fuera de la rama `twa-android`** a propósito, porque era el único
+   archivo que hacía falta tocar en producción para que Chrome verifique la
+   app. **Hay que revertirlo en cuanto se termine de probar:**
+   ```bash
+   cd scild-emergencia
+   git rm public/.well-known/assetlinks.json
+   git commit -m "Revertir: ya se probó el canal nativo del TWA"
+   git push
+   ```
+2. **Falta correr `npx prisma migrate deploy`** en `scild-backend` con la
+   rama `twa-android` (migración `push_token_platform`) — sin esto, el
+   backend de esa rama no se puede desplegar (truena toda consulta a
+   `PushToken`). El build de Android SÍ sirve para probar el canal nativo
+   sin esto (se manda un push de prueba directo con un script, sin pasar
+   por el backend real — ver el hilo de conversación si hace falta repetirlo).
+3. **Ninguna de las dos ramas `twa-android` (scild-emergencia,
+   scild-backend) está mergeada a `main`.** Falta: que el usuario pruebe el
+   APK con el canal nativo, revisar ambas ramas, correr la migración, y
+   mergear las dos juntas (el orden importa: el backend primero, o el
+   frontend mandaría tokens ANDROID que el backend viejo no sabe tratar
+   distinto — aunque tampoco se rompe, solo se comporta como antes).
+4. Lo demás pendiente de Android ya desde antes: cuenta de Google Play
+   Developer, ficha de la tienda, probarlo con un botón físico real.
+
 ## 1. Qué es esto
 
 Una plataforma para gestionar botones físicos de emergencia (ESP32)
