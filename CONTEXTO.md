@@ -865,9 +865,65 @@ paso de esto que sí afecta producción, y el usuario pidió no hacerlo todavía
     todavía), cuestionario de clasificación de contenido.
   - Publicar `android/assetlinks.json` en el dominio (implica mergear esta
     rama o al menos ese archivo a donde se publique `scild-emergencia`).
-  - Decidir si se persigue el canal de notificación nativo con sonido de
-    alarma (código Kotlin extra sobre lo que ya generó Bubblewrap) o se deja
-    así por ahora.
+
+#### Canal nativo para el SOS (7 de octubre)
+
+**Lo confirmé leyendo el código fuente de `androidx.browser.trusted.TrustedWebActivityService`
+(no es una suposición):** la delegación de notificaciones que ya usa esta app
+(`DelegationService`) mete TODAS las notificaciones de un mismo sitio en UN
+SOLO canal de Android, el que sea — no hay forma de que una alerta GENERAL
+suene distinto a un mensaje de chat usando solo esa delegación, sin importar
+qué se mande desde el push web. Tampoco se puede hacer `setFullScreenIntent`
+(la pantalla completa tipo alarma/llamada entrante) por ese camino. Para eso
+hace falta que la app reciba el push DIRECTO, no vía Chrome.
+
+Se implementó un segundo camino, paralelo al push web (que sigue intacto
+para quien no tenga la app instalada):
+
+- **`PushToken.platform`** (`WEB` | `ANDROID`, migración `push_token_platform`
+  — **NO aplicada en Neon todavía**, hace falta `prisma migrate deploy` antes
+  de desplegar esto o cualquier consulta a `PushToken` truena). A los tokens
+  `ANDROID`, `src/push.js` les manda **solo `data`, nunca `notification`**:
+  así Android siempre entrega el mensaje al código de la app
+  (`AlertaMessagingService.onMessageReceived`) en vez de dibujarlo él solo.
+- **Tres canales nativos** (`Application.java`, creados al arrancar): `alertas_sos`
+  (importancia alta, sonido de alarma del sistema — `RingtoneManager.TYPE_ALARM`,
+  no hizo falta diseñar un sonido nuevo —, vibración, `setBypassDnd(true)`),
+  `alertas_tipo` (normal) y `chat` (baja). Una vez creado un canal, Android
+  ignora lo que mande cualquier notificación individual: el canal manda.
+- **`AlarmaActivity`**: pantalla completa roja con "Ya voy"/"Silenciar",
+  disparada con `setFullScreenIntent` SOLO para alertas GENERAL (SOS o botón
+  físico) — despierta el celular y se muestra encima del bloqueo, como una
+  llamada entrante. En Android 14+ (API 34) este permiso no se puede forzar:
+  `LauncherActivity` manda a la persona a Ajustes una sola vez si falta.
+- **El token nativo llega a la web sin un bridge de verdad** (TWA no tiene
+  uno): `LauncherActivity.getLaunchingUrl()` lo pega como `?tokenNativo=...`
+  en la URL de arranque; `notificaciones.ts` lo lee, lo registra con el
+  backend como `ANDROID`, y limpia la URL. Mandarlo en cada arranque es a
+  propósito — registrar el mismo token dos veces no hace daño.
+- **Se detecta si corre dentro de la app empaquetada** con
+  `document.referrer.startsWith("android-app://")` (forma documentada de
+  Chrome para TWAs verificadas): si es así, la web NO pide también el token
+  web — si lo hiciera, el mismo celular recibiría la alerta dos veces, una
+  por cada canal.
+- Se registró una **app Android nueva en el proyecto de Firebase
+  `scild-emergencia`** (mismo proyecto que ya usa Auth) para tener
+  `google-services.json` — se hizo con la Firebase Management API usando el
+  `firebase-service-account.json` que ya existía, sin que el usuario tuviera
+  que entrar a ningún lado.
+- **Build verificado localmente** (assembleRelease compila y firma bien); lo
+  que falta probar es el flujo end-to-end de verdad, porque depende de la
+  migración.
+
+**Todo esto vive en la rama `twa-android` de LOS DOS repos**
+(`scild-emergencia` y, ahora también, `scild-backend`) — la de
+`scild-backend` se abrió específicamente porque este cambio sí puede romper
+producción si se despliega sin la migración aplicada primero.
+
+- Decidir si además se persigue pedir el permiso de "saltarse No molestar"
+  (`setBypassDnd` ya está puesto en el canal, pero sin que el usuario
+  conceda el acceso a política de notificaciones en Ajustes no hace nada) —
+  no se implementó, es un permiso aparte con su propia pantalla de Ajustes.
 
 ## 5. Cómo levantar el proyecto localmente
 
@@ -1036,12 +1092,14 @@ En orden sugerido:
    titular más es alguien que puede despertar a todo el grupo.
 
 12. **Publicar la app de Android (TWA)** — el proyecto ya está generado,
-    compilado y firmado en la rama `twa-android` de `scild-emergencia` (ver
-    "Android — empaquetado como TWA" arriba). Falta: cuenta de Google Play
-    Developer (la crea el usuario), ficha de la tienda (capturas, política
-    de privacidad), publicar `assetlinks.json` en el dominio, y decidir si
-    se persigue el canal de notificación nativo con sonido de alarma
-    (necesita código Kotlin aparte sobre lo que generó Bubblewrap).
+    compilado y firmado en la rama `twa-android` de `scild-emergencia`, con
+    su propio canal nativo para el SOS (alarma + pantalla completa, ver
+    "Android — empaquetado como TWA" arriba). Falta: **correr
+    `prisma migrate deploy`** de la rama `twa-android` de `scild-backend`
+    (bloquea el resto), cuenta de Google Play Developer (la crea el
+    usuario), ficha de la tienda (capturas, política de privacidad),
+    publicar `assetlinks.json` en el dominio, y probar el flujo end-to-end
+    de verdad en un botón real.
 
 ## 7. Notas de seguridad para quien se una
 
