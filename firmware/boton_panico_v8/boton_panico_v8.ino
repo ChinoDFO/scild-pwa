@@ -95,9 +95,9 @@ const char* FIRMWARE_VERSION = "v8";
 // ─────────────────────────────────────────────
 //  PINES
 // ─────────────────────────────────────────────
-const int PIN_BOTON = 13;
-const int PIN_LED_VERDE = 14;
-const int PIN_LED_ROJO = 12;
+const int PIN_BOTON = 14;
+const int PIN_LED_VERDE = 12;
+const int PIN_LED_ROJO = 13;
 
 // ─────────────────────────────────────────────
 //  ESTADO
@@ -113,7 +113,7 @@ String deviceSecret = "";
 String NOMBRE_NEGOCIO = "Negocio";
 String DIRECCION = "Dirección";
 unsigned long COOLDOWN = 10000;             // ms entre alertas
-unsigned long INTERVALO_HEARTBEAT = 3000; // ms entre avisos de vida
+unsigned long INTERVALO_HEARTBEAT = 60000; // ms entre avisos de vida
 long configVersion = 0;                     // versión aplicada, la da el servidor
 
 unsigned long ultimaAlerta = 0;
@@ -150,6 +150,9 @@ const int MAX_FALLOS_INTERNET = 3;
 unsigned long ultimoHeartbeat = 0;
 
 String ssid1, pass1, ssid2, pass2;
+// true = conectado a la red de RESPALDO ahora mismo. Sirve para saber a cuál
+// de las dos cambiarse la próxima vez (ver intentarOtraRed más abajo).
+bool usandoRespaldo = false;
 
 // ─────────────────────────────────────────────
 //  HTML DEL PORTAL PERSONALIZADO
@@ -334,6 +337,11 @@ void loop() {
         ESP.restart();
       }
 
+      // Primero el intento rápido de wifiMulti (sirve para el caso común: la
+      // misma red se cayó un momento y ya volvió). Si lleva un rato sin
+      // lograrlo, se prueba la OTRA red explícitamente por nombre — wifiMulti
+      // por sí solo no sirve aquí: si la red que se cayó sigue registrada y
+      // vuelve a aparecer, puede preferirla por señal antes que la otra.
       if (wifiMulti.run(5000) == WL_CONNECTED) {
         Serial.print("✓ Reconectado a: ");
         Serial.println(WiFi.SSID());
@@ -347,6 +355,14 @@ void loop() {
         Serial.print("✗ Sin red. Tiempo: ");
         Serial.print(seg);
         Serial.println("s");
+
+        if (seg >= 20 && intentarOtraRed()) {
+          inicioSinWifi = 0;
+          fallosInternet = 0;
+          internetDisponible = hayInternet();
+          setLEDs(internetDisponible);
+          if (internetDisponible) enviarHeartbeat();
+        }
       }
 
     } else {
@@ -376,8 +392,16 @@ void loop() {
             fallosInternet = 0;
             Serial.println("✗ 3 fallos seguidos. Intentando red de respaldo...");
             setLEDs(false);
-            WiFi.disconnect();
-            delay(500);
+            // No basta con desconectar y dejar que wifiMulti decida solo: la
+            // red "principal" sigue prendida y con buena señal (el problema
+            // es que el módem/ISP no tiene internet, no el router), así que
+            // wifiMulti se vuelve a conectar a la MISMA red de siempre y la
+            // de respaldo nunca se llega a usar. Por eso aquí se pide por
+            // nombre, a propósito, la otra red.
+            if (!intentarOtraRed()) {
+              WiFi.disconnect();
+              delay(500);
+            }
           }
         }
       }
@@ -449,6 +473,48 @@ void configurarWifiMulti() {
     Serial.print("  wifiMulti: red de respaldo registrada -> ");
     Serial.println(ssid2);
   }
+}
+
+// Se conecta, A PROPÓSITO Y POR NOMBRE, a la red contraria a la que esté
+// marcada en usandoRespaldo — no a la que decida wifiMulti por señal.
+//
+// Por qué hace falta esto aparte de wifiMulti: wifiMulti.run() escanea y
+// elige la red registrada con mejor señal, sin memoria de "esta ya la
+// probé y no sirvió". Si el router principal sigue prendido (señal
+// buena) pero el problema es el módem/ISP sin internet, wifiMulti vuelve a
+// conectarse a esa MISMA red cada vez — la de respaldo, aunque esté
+// registrada, nunca gana porque nunca se le da la oportunidad. Esta función
+// fuerza el cambio con WiFi.begin() directo a la otra red por su nombre.
+bool intentarOtraRed() {
+  String ssidObjetivo = usandoRespaldo ? ssid1 : ssid2;
+  String passObjetivo = usandoRespaldo ? pass1 : pass2;
+
+  if (ssidObjetivo.length() == 0) return false;  // no hay otra red configurada
+
+  Serial.print("↻ Probando la red ");
+  Serial.print(usandoRespaldo ? "principal" : "de respaldo");
+  Serial.print(" (");
+  Serial.print(ssidObjetivo);
+  Serial.println(")...");
+
+  WiFi.disconnect();
+  delay(300);
+  WiFi.begin(ssidObjetivo.c_str(), passObjetivo.c_str());
+
+  unsigned long inicio = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - inicio < 15000) {
+    delay(300);
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    usandoRespaldo = !usandoRespaldo;
+    Serial.print("✓ Conectado a ");
+    Serial.println(WiFi.SSID());
+    return true;
+  }
+
+  Serial.println("✗ Esa red tampoco contestó.");
+  return false;
 }
 
 // ─────────────────────────────────────────────
