@@ -108,23 +108,43 @@ async function repetirAlerta(alerta, aviso, tokens) {
   return RONDAS_DE_ALERTA;
 }
 
+// Mismo criterio que InfoGrupo.tsx en la PWA: coordenadas si ya se
+// capturaron, si no la dirección de texto, y null si no hay ninguna de las
+// dos (grupo recién creado, todavía sin ubicación).
+function enlaceDeMapa(grupo) {
+  if (grupo.latitude != null && grupo.longitude != null) {
+    return `https://www.google.com/maps/search/?api=1&query=${grupo.latitude},${grupo.longitude}`;
+  }
+  if (grupo.address) {
+    return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(grupo.address)}`;
+  }
+  return null;
+}
+
 // Al enviar, una alerta se ve así en la pantalla del celular. El título dice
 // QUÉ pasa (tipo) y el cuerpo quién/dónde, para entenderla sin abrir la app.
+// El enlace al mapa va al final del cuerpo (no en un campo aparte: una
+// notificación no tiene dónde más ponerlo) para que, sin ni abrir la app,
+// se pueda tocar y llegar a dónde está pasando la emergencia.
 function armarAviso(alerta) {
   const tipo = tipoDeAlerta(alerta.type);
   const nombreGrupo = alerta.group.name;
   const title = `${tipo.emoji} ${tipo.etiqueta}`;
+  const mapa = enlaceDeMapa(alerta.group);
+  const conMapa = (texto) => (mapa ? `${texto}\n📍 ${mapa}` : texto);
 
   if (alerta.source === "DEVICE") {
     const boton = alerta.device?.name || alerta.device?.deviceCode || "el botón";
-    return { title, body: `Se presionó ${boton} en ${nombreGrupo}` };
+    return { title, body: conMapa(`Se presionó ${boton} en ${nombreGrupo}`) };
   }
 
   const quien = alerta.createdBy?.displayName || alerta.createdBy?.email;
   const que = tipo.id === "GENERAL" ? "una emergencia" : tipo.etiqueta.toLowerCase();
   return {
     title,
-    body: quien ? `${quien} reportó ${que} en ${nombreGrupo}` : `Alerta en ${nombreGrupo}: ${que}`,
+    body: conMapa(
+      quien ? `${quien} reportó ${que} en ${nombreGrupo}` : `Alerta en ${nombreGrupo}: ${que}`
+    ),
   };
 }
 
@@ -165,7 +185,7 @@ export async function enviarPushDeAlerta(alertId) {
   const alerta = await prisma.alert.findUnique({
     where: { id: alertId },
     include: {
-      group: { select: { name: true } },
+      group: { select: { name: true, address: true, latitude: true, longitude: true } },
       device: { select: { name: true, deviceCode: true } },
       createdBy: { select: { email: true, displayName: true } },
       notifications: {
@@ -274,7 +294,7 @@ export async function enviarRecordatorioDeAlertaSostenida(alertId) {
   const alerta = await prisma.alert.findUnique({
     where: { id: alertId },
     include: {
-      group: { select: { name: true } },
+      group: { select: { name: true, address: true, latitude: true, longitude: true } },
       device: { select: { name: true, deviceCode: true } },
       createdBy: { select: { email: true, displayName: true } },
       notifications: { include: { user: { select: { pushTokens: true } } } },
