@@ -45,8 +45,40 @@ export async function borrarGruposVacios() {
 // alguien abre el chat.
 const RETENCION_MENSAJES_DIAS = 90;
 
+// Mínimo que puede configurar un admin para "mensajes temporales" en su
+// grupo (Group.mensajesTemporalesSegundos, ver schema.prisma y
+// routes/groups.js). Por debajo de esto el chat se volvería inútil para
+// coordinarse en una emergencia real.
+export const MIN_MENSAJES_TEMPORALES_SEGUNDOS = 3 * 24 * 60 * 60;
+
 export async function borrarMensajesViejos() {
-  const limite = new Date(Date.now() - RETENCION_MENSAJES_DIAS * 24 * 60 * 60 * 1000);
-  const { count } = await prisma.message.deleteMany({ where: { createdAt: { lt: limite } } });
-  return { borrados: count, limite };
+  const limiteGeneral = new Date(Date.now() - RETENCION_MENSAJES_DIAS * 24 * 60 * 60 * 1000);
+
+  const gruposConTemporales = await prisma.group.findMany({
+    where: { mensajesTemporalesSegundos: { not: null } },
+    select: { id: true, mensajesTemporalesSegundos: true },
+  });
+
+  let borrados = 0;
+
+  // Un grupo con su propio límite usa el que caiga más reciente entre el
+  // suyo y el general: el ajuste del admin puede acortar cuánto dura un
+  // mensaje en SU grupo, nunca alargarlo más allá del tope general de la
+  // plataforma (ahí está el ahorro de espacio que explica el comentario de
+  // arriba).
+  for (const grupo of gruposConTemporales) {
+    const limiteDelGrupo = new Date(Date.now() - grupo.mensajesTemporalesSegundos * 1000);
+    const limiteEfectivo = limiteDelGrupo > limiteGeneral ? limiteDelGrupo : limiteGeneral;
+    const { count } = await prisma.message.deleteMany({
+      where: { groupId: grupo.id, createdAt: { lt: limiteEfectivo } },
+    });
+    borrados += count;
+  }
+
+  const { count } = await prisma.message.deleteMany({
+    where: { createdAt: { lt: limiteGeneral }, group: { mensajesTemporalesSegundos: null } },
+  });
+  borrados += count;
+
+  return { borrados, limite: limiteGeneral };
 }

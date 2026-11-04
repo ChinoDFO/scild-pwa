@@ -96,6 +96,16 @@ model Group {
   // son dos cosas sin relación.
   maxMembers Int @default(10)
   inviteCode String   @unique
+  // Si se configura, los mensajes de este grupo se borran solos al llegar a
+  // esta antigüedad (mínimo 3 días, ver MIN_MENSAJES_TEMPORALES_SEGUNDOS en
+  // limpieza.js). Null = este grupo no tiene mensajes temporales; sigue
+  // aplicando el borrado general por antigüedad (RETENCION_MENSAJES_DIAS).
+  mensajesTemporalesSegundos Int?
+  // Hasta TOPE_FAVORITOS ids de tipo de alerta (del catálogo fijo o de los
+  // personalizados de este grupo) que el admin eligió para que salgan
+  // primero en "¿Qué está pasando?" (ver tiposAlertaGrupo.js). Vacío = se
+  // usan los primeros del catálogo fijo por default.
+  tiposFavoritos String[] @default([])
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
@@ -105,6 +115,7 @@ model Group {
   devices  DeviceGroup[]
   alerts   Alert[]
   messages Message[]
+  tiposPersonalizados TipoAlertaPersonalizado[]
 }
 
 model GroupMember {
@@ -335,15 +346,45 @@ model Message {
   userId    String
   content   String
   createdAt DateTime @default(now())
+  // Quién la borró y cuándo. Se conserva la fila (no se borra de verdad) para
+  // que un hilo que le respondía no se quede señalando a nada: se dibuja
+  // como "Mensaje eliminado". El autor puede borrar la suya; el ADMIN del
+  // grupo, la de cualquiera.
+  deletedAt DateTime?
+  deletedBy String?
+  // A qué mensaje responde (como en WhatsApp), si responde a alguno. Si el
+  // original se borra de verdad (limpieza por antigüedad, ver limpieza.js)
+  // esto cae en null solo: no tiene caso tombstonear algo que ya no existe.
+  replyToId String?
 
-  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  group      Group     @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  replyTo    Message?  @relation("Respuestas", fields: [replyToId], references: [id], onDelete: SetNull)
+  respuestas Message[] @relation("Respuestas")
 
   @@index([groupId, createdAt])
   // Para la limpieza diaria (ver src/limpieza.js): borra por antigüedad sin
   // importar el grupo, así que el índice de arriba (que arranca en groupId)
   // no le sirve de nada a ese filtro.
   @@index([createdAt])
+  @@index([replyToId])
+}
+
+// Tipos de alerta propios de un grupo (hasta TOPE_PERSONALIZADOS, ver
+// tiposAlertaGrupo.js), además del catálogo fijo de src/tiposAlerta.js. El id
+// de la fila se usa directamente como Alert.type: no colisiona con el
+// catálogo fijo porque esos ids van en MAYÚSCULAS_CON_GUION_BAJO y un uuid
+// nunca se ve así.
+model TipoAlertaPersonalizado {
+  id        String   @id @default(uuid())
+  groupId   String
+  etiqueta  String
+  emoji     String
+  createdAt DateTime @default(now())
+
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@index([groupId])
 }
 
 model AuditLog {

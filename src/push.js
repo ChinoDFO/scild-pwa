@@ -1,7 +1,8 @@
 import { firebaseMessaging } from "./firebaseAdmin.js";
 import prisma from "./prisma.js";
 import { estaViendoGrupo } from "./realtime.js";
-import { tipoDeAlerta } from "./tiposAlerta.js";
+import { tipoDeAlertaParaGrupo } from "./tiposAlertaGrupo.js";
+import { enlaceDeMapa } from "./mapas.js";
 
 // Códigos con los que FCM avisa que un token ya no sirve: la PWA se
 // desinstaló, el usuario revocó el permiso, o el token rotó. Esos se borran
@@ -40,10 +41,14 @@ export const RECORDATORIO_SOSTENIDO_MS = 15 * 60 * 1000;
 const esperar = (ms) => new Promise((seguir) => setTimeout(seguir, ms));
 
 // El mensaje que se manda a FCM, idéntico en todas las rondas.
+// `aviso` trae { title, body, mapa }: mapa es el link para el botón "Ver
+// ubicación" (o null) y no va dentro de `notification` —ahí FCM solo acepta
+// sus campos propios— sino en `data` (como string, nunca null) y en un
+// action aparte del webpush.
 function mensajeDeAlerta(alerta, aviso, tokens) {
   return {
     tokens,
-    notification: aviso,
+    notification: { title: aviso.title, body: aviso.body },
     // Los valores de data tienen que ser strings; la PWA los usa para saber
     // a qué alerta corresponde el aviso que le llegó.
     data: {
@@ -56,6 +61,8 @@ function mensajeDeAlerta(alerta, aviso, tokens) {
       // "carro sospechoso" se avisa, pero sin ruido.
       type: alerta.type,
       createdAt: alerta.createdAt.toISOString(),
+      // Lo usa notificationclick en sw.ts para el botón "Ver ubicación".
+      mapUrl: aviso.mapa ?? "",
     },
     webpush: {
       notification: {
@@ -78,7 +85,13 @@ function mensajeDeAlerta(alerta, aviso, tokens) {
         badge: "/pwa-192x192.png",
         // Atender desde la notificación: abre la app ya con la alerta
         // marcada como "voy en camino" (lo resuelve la pantalla del grupo).
-        actions: [{ action: "atender", title: "Ya voy" }],
+        // "Ver ubicación" solo si el grupo tiene dónde mandar (dirección o
+        // coordenadas): la mayoría de los navegadores no muestran más de 2
+        // botones, así que con mapa son exactamente los 2 que importan.
+        actions: [
+          { action: "atender", title: "Ya voy" },
+          ...(aviso.mapa ? [{ action: "ver-ubicacion", title: "Ver ubicación" }] : []),
+        ],
       },
       // Al tocar el aviso se abre el grupo de la alerta, no la pantalla de
       // inicio: en una emergencia nadie debería tener que buscar el grupo.
@@ -108,43 +121,32 @@ async function repetirAlerta(alerta, aviso, tokens) {
   return RONDAS_DE_ALERTA;
 }
 
-// Mismo criterio que InfoGrupo.tsx en la PWA: coordenadas si ya se
-// capturaron, si no la dirección de texto, y null si no hay ninguna de las
-// dos (grupo recién creado, todavía sin ubicación).
-function enlaceDeMapa(grupo) {
-  if (grupo.latitude != null && grupo.longitude != null) {
-    return `https://www.google.com/maps/search/?api=1&query=${grupo.latitude},${grupo.longitude}`;
-  }
-  if (grupo.address) {
-    return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(grupo.address)}`;
-  }
-  return null;
-}
-
 // Al enviar, una alerta se ve así en la pantalla del celular. El título dice
 // QUÉ pasa (tipo) y el cuerpo quién/dónde, para entenderla sin abrir la app.
-// El enlace al mapa va al final del cuerpo (no en un campo aparte: una
-// notificación no tiene dónde más ponerlo) para que, sin ni abrir la app,
-// se pueda tocar y llegar a dónde está pasando la emergencia.
-function armarAviso(alerta) {
-  const tipo = tipoDeAlerta(alerta.type);
+// El teléfono va al final del cuerpo, en su propio renglón: así no hay que
+// abrir la app para saber a dónde marcar. La ubicación YA NO va de texto
+// aquí (antes era un link plano) — ahora es el botón "Ver ubicación" de la
+// notificación, armado en mensajeDeAlerta a partir de `mapa`.
+async function armarAviso(alerta) {
+  const tipo = await tipoDeAlertaParaGrupo(alerta.groupId, alerta.type);
   const nombreGrupo = alerta.group.name;
   const title = `${tipo.emoji} ${tipo.etiqueta}`;
   const mapa = enlaceDeMapa(alerta.group);
-  const conMapa = (texto) => (mapa ? `${texto}\n📍 ${mapa}` : texto);
+  const conTelefono = (texto) => `${texto}\nMarca al ${tipo.telefono}.`;
 
   if (alerta.source === "DEVICE") {
     const boton = alerta.device?.name || alerta.device?.deviceCode || "el botón";
-    return { title, body: conMapa(`Se presionó ${boton} en ${nombreGrupo}`) };
+    return { title, body: conTelefono(`Se presionó ${boton} en ${nombreGrupo}`), mapa };
   }
 
   const quien = alerta.createdBy?.displayName || alerta.createdBy?.email;
   const que = tipo.id === "GENERAL" ? "una emergencia" : tipo.etiqueta.toLowerCase();
   return {
     title,
-    body: conMapa(
+    body: conTelefono(
       quien ? `${quien} reportó ${que} en ${nombreGrupo}` : `Alerta en ${nombreGrupo}: ${que}`
     ),
+    mapa,
   };
 }
 
@@ -218,7 +220,7 @@ export async function enviarPushDeAlerta(alertId) {
     return { tokens: 0, enviadas: 0, fallidas: 0, tokensBorrados: 0 };
   }
 
-  const aviso = armarAviso(alerta);
+  const aviso = await armarAviso(alerta);
 
   const respuesta = await firebaseMessaging.sendEachForMulticast(
     mensajeDeAlerta(alerta, aviso, tokens)
@@ -311,7 +313,7 @@ export async function enviarRecordatorioDeAlertaSostenida(alertId) {
     return { tokens: 0, enviados: 0 };
   }
 
-  const aviso = armarAviso(alerta);
+  const aviso = await armarAviso(alerta);
   const respuesta = await firebaseMessaging.sendEachForMulticast(
     mensajeDeAlerta(alerta, aviso, tokens)
   );

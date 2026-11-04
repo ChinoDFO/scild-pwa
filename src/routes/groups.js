@@ -13,6 +13,13 @@ import {
 import { cupoValido, cuposDelGrupo, exigirLugar } from "../cupos.js";
 import { emitirAGrupo } from "../realtime.js";
 import { enviarPushDeMensaje } from "../push.js";
+import { MIN_MENSAJES_TEMPORALES_SEGUNDOS } from "../limpieza.js";
+import {
+  esTipoValidoParaGrupo,
+  validarPersonalizado,
+  TOPE_PERSONALIZADOS,
+  TOPE_FAVORITOS,
+} from "../tiposAlertaGrupo.js";
 
 const router = Router();
 
@@ -237,6 +244,14 @@ router.get("/:id", userAuth, async (req, res) => {
     address: group.address,
     latitude: group.latitude,
     longitude: group.longitude,
+    // Null = no hay mensajes temporales en este grupo (se usa el borrado
+    // general por antigüedad). Solo el admin la edita, pero cualquiera la
+    // ve: el chat avisa a todos cuánto va a durar lo que escriben.
+    mensajesTemporalesSegundos: group.mensajesTemporalesSegundos,
+    // Ids (del catálogo fijo o de los personalizados del grupo) que salen
+    // primero en "¿Qué está pasando?". El detalle de cada uno (etiqueta,
+    // emoji) se pide a GET /alerts/tipos?groupId=.
+    tiposFavoritos: group.tiposFavoritos,
     role: membresia.role,
     // Para que la PWA distinga sus propios mensajes en el chat.
     myUserId: req.user.id,
@@ -294,6 +309,39 @@ router.patch("/:id", userAuth, async (req, res) => {
     data.maxMembers = req.body.maxMembers;
   }
 
+  // null quita los mensajes temporales (se usa el borrado general). Un
+  // número tiene que cumplir el mínimo de MIN_MENSAJES_TEMPORALES_SEGUNDOS
+  // (3 días) — por debajo el chat se volvería inútil para coordinarse en una
+  // emergencia real.
+  if (req.body?.mensajesTemporalesSegundos !== undefined) {
+    const valor = req.body.mensajesTemporalesSegundos;
+    if (valor !== null && (!Number.isInteger(valor) || valor < MIN_MENSAJES_TEMPORALES_SEGUNDOS)) {
+      return res.status(400).json({
+        error: `Los mensajes temporales duran mínimo ${MIN_MENSAJES_TEMPORALES_SEGUNDOS / 86400} días`,
+      });
+    }
+    data.mensajesTemporalesSegundos = valor;
+  }
+
+  // Hasta TOPE_FAVORITOS ids, y cada uno tiene que ser un tipo real para
+  // este grupo (del catálogo fijo o personalizado suyo) — si no, el menú de
+  // "¿Qué está pasando?" mostraría un favorito que no significa nada.
+  if (req.body?.tiposFavoritos !== undefined) {
+    const favoritos = req.body.tiposFavoritos;
+    if (
+      !Array.isArray(favoritos) ||
+      favoritos.length > TOPE_FAVORITOS ||
+      favoritos.some((f) => typeof f !== "string")
+    ) {
+      return res.status(400).json({ error: `Elige máximo ${TOPE_FAVORITOS} favoritos` });
+    }
+    const validos = await Promise.all(favoritos.map((id) => esTipoValidoParaGrupo(req.params.id, id)));
+    if (validos.some((v) => !v)) {
+      return res.status(400).json({ error: "Alguno de los favoritos no es un tipo de alerta válido" });
+    }
+    data.tiposFavoritos = favoritos;
+  }
+
   const group = await prisma.$transaction(async (tx) => {
     const actualizado = await tx.group.update({ where: { id: req.params.id }, data });
     await tx.auditLog.create({
@@ -329,25 +377,131 @@ router.post("/:id/invite-code", userAuth, async (req, res) => {
   res.json({ inviteCode: group.inviteCode });
 });
 
+// --- Tipos de alerta personalizados -----------------------------------------
+
+// El ADMIN crea una alarma propia del grupo (hasta TOPE_PERSONALIZADOS). Sale
+// en el menú de "¿Qué está pasando?" de todos los miembros, mezclada con el
+// catálogo fijo (ver GET /alerts/tipos?groupId=).
+router.post("/:id/tipos-alerta", userAuth, async (req, res) => {
+  if (!(await exigirAdmin(req, res))) return;
+
+  const { data, error } = validarPersonalizado(req.body);
+  if (error) {
+    return res.status(400).json({ error });
+  }
+
+  const existentes = await prisma.tipoAlertaPersonalizado.count({ where: { groupId: req.params.id } });
+  if (existentes >= TOPE_PERSONALIZADOS) {
+    return res.status(409).json({ error: `Ya tienes ${TOPE_PERSONALIZADOS} alarmas personalizadas, el máximo` });
+  }
+
+  const tipo = await prisma.$transaction(async (tx) => {
+    const creado = await tx.tipoAlertaPersonalizado.create({ data: { ...data, groupId: req.params.id } });
+    await tx.auditLog.create({
+      data: {
+        userId: req.user.id,
+        action: "ALERT_TYPE_CREATED",
+        entity: "TipoAlertaPersonalizado",
+        entityId: creado.id,
+        metadata: data,
+      },
+    });
+    return creado;
+  });
+
+  emitirAGrupo(req.params.id, "grupo:actualizado", { groupId: req.params.id });
+  res.status(201).json({ id: tipo.id, etiqueta: tipo.etiqueta, emoji: tipo.emoji, personalizado: true });
+});
+
+// El ADMIN la quita. Las alertas viejas que la usaron no se tocan: su tipo
+// cae en GENERAL al dibujarse (ver tipoDeAlertaParaGrupo en
+// tiposAlertaGrupo.js), igual que si el catálogo fijo perdiera una entrada.
+router.delete("/:id/tipos-alerta/:tipoId", userAuth, async (req, res) => {
+  if (!(await exigirAdmin(req, res))) return;
+
+  const tipo = await prisma.tipoAlertaPersonalizado.findFirst({
+    where: { id: req.params.tipoId, groupId: req.params.id },
+  });
+  if (!tipo) {
+    return res.status(404).json({ error: "Esa alarma no existe en este grupo" });
+  }
+
+  await prisma.$transaction(async (tx) => {
+    await tx.tipoAlertaPersonalizado.delete({ where: { id: tipo.id } });
+
+    // Si estaba en favoritos, se quita: un favorito que apunta a una alarma
+    // que ya no existe no rompe nada (se filtra solo al armar el catálogo),
+    // pero no tiene caso dejarlo ahí.
+    const grupo = await tx.group.findUnique({ where: { id: req.params.id }, select: { tiposFavoritos: true } });
+    if (grupo.tiposFavoritos.includes(tipo.id)) {
+      await tx.group.update({
+        where: { id: req.params.id },
+        data: { tiposFavoritos: grupo.tiposFavoritos.filter((id) => id !== tipo.id) },
+      });
+    }
+
+    await tx.auditLog.create({
+      data: {
+        userId: req.user.id,
+        action: "ALERT_TYPE_DELETED",
+        entity: "TipoAlertaPersonalizado",
+        entityId: tipo.id,
+        metadata: { etiqueta: tipo.etiqueta },
+      },
+    });
+  });
+
+  emitirAGrupo(req.params.id, "grupo:actualizado", { groupId: req.params.id });
+  res.json({ ok: true });
+});
+
 // --- Chat del grupo ---------------------------------------------------------
 
 const MAX_MENSAJE = 1000;
 const POR_PAGINA = 50;
 
+// Un mensaje borrado conserva su fila (para que a lo que responden no se
+// quede señalando a nada) pero sale sin su contenido real: la PWA dibuja
+// "Mensaje eliminado" con solo ver `eliminado`.
 function formatoMensaje(m) {
+  const eliminado = Boolean(m.deletedAt);
   return {
     id: m.id,
     groupId: m.groupId,
-    content: m.content,
+    content: eliminado ? "" : m.content,
+    eliminado,
     createdAt: m.createdAt,
     autor: {
       id: m.user.id,
       nombre: m.user.displayName || m.user.email,
     },
+    respondeA: m.replyTo ? formatoRespondeA(m.replyTo) : null,
   };
 }
 
-const SELECCION_AUTOR = { user: { select: { id: true, displayName: true, email: true } } };
+// Vista chica del mensaje al que se responde (como la barra de cita de
+// WhatsApp): solo lo necesario para dibujarla sin otra consulta.
+function formatoRespondeA(r) {
+  const eliminado = Boolean(r.deletedAt);
+  return {
+    id: r.id,
+    content: eliminado ? "" : r.content,
+    eliminado,
+    autor: { id: r.user.id, nombre: r.user.displayName || r.user.email },
+  };
+}
+
+const SELECCION_AUTOR = {
+  user: { select: { id: true, displayName: true, email: true } },
+  replyTo: {
+    select: {
+      id: true,
+      content: true,
+      deletedAt: true,
+      user: { select: { id: true, displayName: true, email: true } },
+    },
+  },
+};
 
 // Historial, del más viejo al más nuevo. ?antesDe=<fecha ISO> trae la página
 // anterior (para "cargar mensajes anteriores").
@@ -383,7 +537,7 @@ router.post("/:id/messages", userAuth, async (req, res) => {
     return res.status(404).json({ error: "Grupo no encontrado" });
   }
 
-  const { content } = req.body ?? {};
+  const { content, replyToId } = req.body ?? {};
   if (!esTexto(content)) {
     return res.status(400).json({ error: "El mensaje está vacío" });
   }
@@ -391,9 +545,27 @@ router.post("/:id/messages", userAuth, async (req, res) => {
     return res.status(400).json({ error: `El mensaje pasa de ${MAX_MENSAJE} caracteres` });
   }
 
+  // Solo se puede responder a un mensaje del MISMO grupo. No importa si ya
+  // está eliminado (se puede citar su tombstone, como en WhatsApp); lo que
+  // no puede ser es de otro chat.
+  if (replyToId !== undefined && replyToId !== null) {
+    const original = await prisma.message.findUnique({
+      where: { id: replyToId },
+      select: { groupId: true },
+    });
+    if (!original || original.groupId !== req.params.id) {
+      return res.status(400).json({ error: "Ese mensaje no es de este grupo" });
+    }
+  }
+
   const mensaje = formatoMensaje(
     await prisma.message.create({
-      data: { groupId: req.params.id, userId: req.user.id, content: content.trim() },
+      data: {
+        groupId: req.params.id,
+        userId: req.user.id,
+        content: content.trim(),
+        replyToId: replyToId || null,
+      },
       include: SELECCION_AUTOR,
     })
   );
@@ -410,6 +582,53 @@ router.post("/:id/messages", userAuth, async (req, res) => {
   enviarPushDeMensaje(mensaje)
     .then((r) => console.log(`Mensaje ${mensaje.id}: push a ${r.tokens} tokens, ${r.enviados} entregados`))
     .catch((e) => console.error(`No se pudo enviar el push del mensaje ${mensaje.id}:`, e));
+});
+
+// Borra el CONTENIDO de un mensaje (la fila se queda como tombstone, ver
+// formatoMensaje). Su autor puede borrar el suyo; el ADMIN del grupo, el de
+// cualquiera. Es idempotente: borrar uno que ya estaba borrado no hace nada
+// y responde igual.
+router.delete("/:id/messages/:messageId", userAuth, async (req, res) => {
+  const membresia = await buscarMembresia(req.user.id, req.params.id);
+  if (!membresia) {
+    return res.status(404).json({ error: "Grupo no encontrado" });
+  }
+
+  const mensaje = await prisma.message.findFirst({
+    where: { id: req.params.messageId, groupId: req.params.id },
+  });
+  if (!mensaje) {
+    return res.status(404).json({ error: "Mensaje no encontrado" });
+  }
+
+  if (mensaje.userId !== req.user.id && membresia.role !== "ADMIN") {
+    return res.status(403).json({ error: "Solo puedes borrar tus propios mensajes" });
+  }
+
+  if (!mensaje.deletedAt) {
+    await prisma.$transaction([
+      prisma.message.update({
+        where: { id: mensaje.id },
+        data: { content: "", deletedAt: new Date(), deletedBy: req.user.id },
+      }),
+      prisma.auditLog.create({
+        data: {
+          userId: req.user.id,
+          action: "MESSAGE_DELETED",
+          entity: "Message",
+          entityId: mensaje.id,
+          metadata: { groupId: req.params.id, autorOriginal: mensaje.userId },
+        },
+      }),
+    ]);
+
+    emitirAGrupo(req.params.id, "mensaje:eliminado", {
+      groupId: req.params.id,
+      messageId: mensaje.id,
+    });
+  }
+
+  res.json({ ok: true });
 });
 
 function marcarLeido(userId, groupId) {
