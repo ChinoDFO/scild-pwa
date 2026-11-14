@@ -12,7 +12,7 @@ export async function deviceAuth(req, res, next) {
     return res.status(401).json({ error: "Credenciales de dispositivo faltantes" });
   }
 
-  const device = await prisma.device.findUnique({ where: { deviceCode } });
+  let device = await prisma.device.findUnique({ where: { deviceCode } });
 
   // Mismo mensaje de error si el deviceCode no existe o si el secreto no
   // coincide, para no revelar cuáles códigos de dispositivo son válidos.
@@ -29,6 +29,41 @@ export async function deviceAuth(req, res, next) {
         `secreto de ${deviceSecret.length} caracteres`
     );
     return res.status(401).json({ error: "Dispositivo no autorizado" });
+  }
+
+  // Candado contra flashear el mismo credenciales.h en dos chips distintos
+  // por error (lo que pasó con BTN-002: un ESP32 de prueba mandó alertas
+  // reales porque traía encima el código+secreto de un botón que ya existía).
+  // El firmware manda su MAC en el cuerpo; la primera vez que se ve este
+  // deviceCode se queda pinchado a esa MAC, y de ahí en adelante cualquier
+  // request con el código+secreto correctos pero OTRA MAC se rechaza: es un
+  // aparato físico distinto, no el mismo botón.
+  //
+  // Firmware viejo que todavía no manda macAddress no se ve afectado: sin
+  // ese dato no hay nada que comparar, así que pasa igual que antes.
+  const macEntrante = typeof req.body?.macAddress === "string" ? req.body.macAddress.trim() : "";
+  if (macEntrante) {
+    if (!device.macAddress) {
+      device = await prisma.device.update({
+        where: { id: device.id },
+        data: { macAddress: macEntrante },
+      });
+    } else if (device.macAddress !== macEntrante) {
+      console.warn(
+        `Dispositivo rechazado en ${req.method} ${req.originalUrl}: ` +
+          `deviceCode="${deviceCode}" tiene MAC distinta a la ya registrada ` +
+          `(esperada ${device.macAddress}, llegó ${macEntrante}) — posible credencial duplicada en otro aparato`
+      );
+      await prisma.auditLog.create({
+        data: {
+          action: "DEVICE_MAC_MISMATCH",
+          entity: "Device",
+          entityId: device.id,
+          metadata: { esperada: device.macAddress, recibida: macEntrante, ruta: req.originalUrl },
+        },
+      });
+      return res.status(401).json({ error: "Dispositivo no autorizado" });
+    }
   }
 
   req.device = device;

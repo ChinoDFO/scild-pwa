@@ -160,6 +160,13 @@ model Device {
   claimCode         String?      @unique
   claimedAt         DateTime?
   secretHash        String
+  // La MAC del ESP32 que usó este código+secreto la PRIMERA vez (ver
+  // deviceAuth.js). Null = todavía ninguno se ha autenticado con esto. Es el
+  // candado contra reflashear el mismo credenciales.h en dos chips distintos
+  // por error: si ya hay una MAC guardada, cualquier request que llegue con
+  // el código+secreto correctos pero OTRA MAC se rechaza — significa que es
+  // un aparato físico distinto, no el mismo botón.
+  macAddress        String?
   status            DeviceStatus @default(OFFLINE)
   firmwareVersion   String?
   batteryLevel      Int?
