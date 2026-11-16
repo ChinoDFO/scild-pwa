@@ -68,6 +68,64 @@ export async function cuentasCompletas(userIds) {
   return new Set(titulares.map((t) => t.userId));
 }
 
+// Qué le toca a un botón cuando pierde un titular, sea porque esta función
+// lo quita a propósito o porque borraron la cuenta (ver DELETE /auth/me):
+// si no queda nadie, vuelve a estar "en la caja" (claimedAt en null es lo
+// que hace que el código impreso sirva otra vez; dejarlo con fecha y sin
+// titulares es el estado zombi que ya nos mordió una vez, un botón en un
+// grupo donde nadie podía alertar). Si queda alguien, el más antiguo de los
+// que quedan hereda el aparato, para que haya quien pueda desvincularlo de
+// un grupo. Recibe `tx` porque siempre corre dentro de la transacción de
+// quien la llama.
+export async function reconciliarTitularesDe(tx, deviceId) {
+  const quedan = await tx.deviceHolder.findMany({
+    where: { deviceId },
+    select: { userId: true },
+    orderBy: { createdAt: "asc" },
+  });
+
+  await tx.device.update({
+    where: { id: deviceId },
+    data:
+      quedan.length === 0
+        ? { claimedAt: null, ownerId: null }
+        : { ownerId: quedan[0].userId },
+  });
+
+  return quedan.length;
+}
+
+// Lo opuesto de volverseTitular: esta cuenta suelta su lugar en un botón,
+// sin tocar el resto de la cuenta (a diferencia de eliminarla por completo,
+// que también libera el lugar pero de paso borra todo lo demás). Lo pide el
+// propio titular, nunca a nombre de otro.
+export async function dejarDeSerTitular({ userId, deviceId }) {
+  const titularidad = await prisma.deviceHolder.findUnique({
+    where: { deviceId_userId: { deviceId, userId } },
+    include: { device: { select: { deviceCode: true } } },
+  });
+  if (!titularidad) {
+    throw new ErrorDeAcceso(404, "No eres titular de ese botón");
+  }
+
+  return prisma.$transaction(async (tx) => {
+    await tx.deviceHolder.delete({ where: { id: titularidad.id } });
+    const quedan = await reconciliarTitularesDe(tx, deviceId);
+
+    await tx.auditLog.create({
+      data: {
+        userId,
+        action: "DEVICE_HOLDER_REMOVED",
+        entity: "Device",
+        entityId: deviceId,
+        metadata: { deviceCode: titularidad.device.deviceCode, quedan },
+      },
+    });
+
+    return { quedan };
+  });
+}
+
 // Vincula una cuenta a un botón con el código impreso en su caja. Es lo que
 // se pide al crear la cuenta y lo que ofrece el apartado de Códigos.
 //

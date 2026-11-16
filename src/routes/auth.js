@@ -1,7 +1,7 @@
 import { Router } from "express";
 import prisma from "../prisma.js";
 import { userAuth } from "../middleware/userAuth.js";
-import { accesoDeCuenta } from "../acceso.js";
+import { accesoDeCuenta, reconciliarTitularesDe } from "../acceso.js";
 import { firebaseAuth } from "../firebaseAdmin.js";
 import { emitirAGrupo } from "../realtime.js";
 
@@ -223,26 +223,10 @@ router.delete("/me", userAuth, async (req, res) => {
     // y Notification.
     await tx.user.delete({ where: { id: userId } });
 
-    // Y ahora sí, los botones que quedaron sin ella.
+    // Y ahora sí, los botones que quedaron sin ella (misma regla que
+    // dejarDeSerTitular, ver acceso.js).
     for (const { deviceId } of titularidades) {
-      const quedan = await tx.deviceHolder.findMany({
-        where: { deviceId },
-        select: { userId: true },
-        orderBy: { createdAt: "asc" },
-      });
-
-      await tx.device.update({
-        where: { id: deviceId },
-        data: quedan.length === 0
-          // Sin titulares vuelve a estar "en la caja": claimedAt en null es
-          // lo que hace que el código impreso sirva otra vez. Dejarlo con
-          // fecha y sin titulares es el estado zombi que ya nos mordió una
-          // vez (un botón en un grupo donde nadie podía alertar).
-          ? { claimedAt: null, ownerId: null }
-          // Queda uno: hereda el aparato, para que alguien pueda
-          // desvincularlo de su grupo.
-          : { ownerId: quedan[0].userId },
-      });
+      await reconciliarTitularesDe(tx, deviceId);
     }
   });
 

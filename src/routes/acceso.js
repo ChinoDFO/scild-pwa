@@ -2,7 +2,7 @@ import { Router } from "express";
 import prisma from "../prisma.js";
 import { userAuth } from "../middleware/userAuth.js";
 import { estadoEfectivo } from "../membership.js";
-import { accesoDeCuenta, volverseTitular } from "../acceso.js";
+import { accesoDeCuenta, dejarDeSerTitular, volverseTitular } from "../acceso.js";
 import {
   configuracionParaElBoton,
   paraLaApp,
@@ -299,6 +299,19 @@ router.post("/vincular", userAuth, async (req, res) => {
     // El botón todavía tiene que vincularse a un grupo para que avise (los
     // grupos a los que ya les avisa se piden en GET /api/acceso).
   });
+});
+
+// Lo opuesto de /vincular: sueltas tu lugar de titular de este botón (de
+// los hasta tres que tiene). No borra tu cuenta ni te saca de ningún
+// grupo — solo que este botón en particular ya no lo puedes disparar tú,
+// y si eras el último titular, el código vuelve a estar libre para que
+// alguien más lo capture.
+router.delete("/botones/:id", userAuth, async (req, res) => {
+  const deviceId = await exigirTitular(req, res);
+  if (!deviceId) return;
+
+  const { quedan } = await dejarDeSerTitular({ userId: req.user.id, deviceId });
+  res.json({ ok: true, quedanTitulares: quedan });
 });
 
 export default router;
