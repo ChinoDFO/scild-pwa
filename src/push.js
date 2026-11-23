@@ -25,7 +25,7 @@ const frontend = () => process.env.FRONTEND_ORIGIN?.split(",")[0] || "http://loc
 // cuando manda la alerta varias veces: con el mismo tag y renotify, cada
 // repetición vuelve a sonar y a vibrar en lugar de apilarse en silencio.
 //
-// Se corta en cuanto alguien toca "Ya voy" o "Resuelta": si el grupo ya
+// Se corta en cuanto alguien toca "Enterado" o "Resuelta": si el grupo ya
 // reaccionó, seguir insistiendo solo entrena a la gente a silenciar la app.
 const RONDAS_DE_ALERTA = 3;
 const ESPERA_ENTRE_RONDAS_MS = 4_000;
@@ -89,7 +89,7 @@ function mensajeDeAlerta(alerta, aviso, tokens) {
         // coordenadas): la mayoría de los navegadores no muestran más de 2
         // botones, así que con mapa son exactamente los 2 que importan.
         actions: [
-          { action: "atender", title: "Ya voy" },
+          { action: "atender", title: "Enterado" },
           ...(aviso.mapa ? [{ action: "ver-ubicacion", title: "Ver ubicación" }] : []),
         ],
       },
@@ -498,16 +498,20 @@ export async function enviarPushDeMensaje(mensaje) {
             webpush: {
               notification: { tag: `chat-${groupId}`, icon: "/pwa-192x192.png" },
               fcmOptions: { link: `${frontend()}/grupos/${groupId}` },
-              // Normal y no high: lo urgente es la alerta. Marcar todo como
-              // urgente gasta batería y, peor, le quita significado a la palabra.
-              headers: { Urgency: "normal" },
+              // High y no normal: un mensaje que llega tarde (el celular lo
+              // dejó en espera por ahorro de batería) es casi tan malo como
+              // uno que no llega. Esto solo controla que SE ENTREGUE pronto,
+              // no lo ruidoso que se ve — eso lo sigue decidiendo el canal
+              // (sin requireInteraction, sin el sonido/vibración de alarma
+              // del SOS).
+              headers: { Urgency: "high" },
             },
           })
         : null,
       android.length > 0
         ? firebaseMessaging.sendEachForMulticast({
             tokens: android,
-            android: { priority: "normal" },
+            android: { priority: "high" },
             data: { kind: "chat", groupId, messageId: mensaje.id, titulo, cuerpo: body },
           })
         : null,

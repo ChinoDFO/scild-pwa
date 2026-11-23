@@ -26,6 +26,7 @@ const SELECCION_ALERTA = {
   group: { select: { name: true, address: true, latitude: true, longitude: true } },
   device: { select: { name: true, deviceCode: true } },
   createdBy: { select: { email: true, displayName: true } },
+  acknowledgedBy: { select: { email: true, displayName: true } },
 };
 
 // Cada alerta sale con su etiqueta, emoji, teléfono y protocolo ya resueltos
@@ -257,6 +258,9 @@ const TRANSICIONES = {
     desde: ["ACTIVE"],
     a: "ACKNOWLEDGED",
     campo: "acknowledgedAt",
+    // Solo "atender" guarda quién fue (ver acknowledgedById en el schema):
+    // "resolver" no lo necesita, nadie pidió saber quién cerró la alerta.
+    campoQuien: "acknowledgedById",
     accion: "ALERT_ACKNOWLEDGED",
     accionSocket: "atendida",
   },
@@ -289,7 +293,11 @@ router.post("/:id/:accion", userAuth, async (req, res) => {
     // "resolver" al mismo tiempo, solo una transición gana.
     const { count } = await tx.alert.updateMany({
       where: { id: alerta.id, status: { in: transicion.desde } },
-      data: { status: transicion.a, [transicion.campo]: new Date() },
+      data: {
+        status: transicion.a,
+        [transicion.campo]: new Date(),
+        ...(transicion.campoQuien ? { [transicion.campoQuien]: req.user.id } : {}),
+      },
     });
     if (count === 0) return null;
 

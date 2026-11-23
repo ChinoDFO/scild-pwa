@@ -86,6 +86,7 @@ model User {
   titularidades DeviceHolder[]
   messages      Message[]
   alertsCreated Alert[]        @relation("AlertCreatedBy")
+  alertsAtendidas Alert[]      @relation("AlertAcknowledgedBy")
   notifications Notification[]
   pushTokens    PushToken[]
   auditLogs     AuditLog[]
@@ -309,7 +310,12 @@ model Alert {
   status         AlertStatus @default(ACTIVE)
   createdById    String?
   createdAt      DateTime    @default(now())
-  acknowledgedAt DateTime?
+  acknowledgedAt   DateTime?
+  // Quién tocó "Enterado". Solo se llena una vez: la primera persona que lo
+  // toca gana la transición ACTIVE -> ACKNOWLEDGED (ver /:id/:accion), así
+  // que no hace falta una lista de todos los que la vieron, solo quien la
+  // destrabó primero.
+  acknowledgedById String?
   resolvedAt     DateTime?
   // Último "sigue presionado" que se mandó mientras esta alerta seguía
   // ACTIVE. Null hasta el primero, que se manda a los 15 min de createdAt.
@@ -318,6 +324,7 @@ model Alert {
   group         Group          @relation(fields: [groupId], references: [id], onDelete: Cascade)
   device        Device?        @relation(fields: [deviceId], references: [id], onDelete: SetNull)
   createdBy     User?          @relation("AlertCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  acknowledgedBy User?         @relation("AlertAcknowledgedBy", fields: [acknowledgedById], references: [id], onDelete: SetNull)
   notifications Notification[]
 
   @@index([groupId, createdAt])
