@@ -2,7 +2,7 @@ import { firebaseMessaging } from "./firebaseAdmin.js";
 import prisma from "./prisma.js";
 import { estaViendoGrupo } from "./realtime.js";
 import { tipoDeAlertaParaGrupo } from "./tiposAlertaGrupo.js";
-import { enlaceDeMapa } from "./mapas.js";
+import { ubicacionDeAlerta } from "./mapas.js";
 
 // Códigos con los que FCM avisa que un token ya no sirve: la PWA se
 // desinstaló, el usuario revocó el permiso, o el token rotó. Esos se borran
@@ -190,7 +190,7 @@ async function armarAviso(alerta) {
   const tipo = await tipoDeAlertaParaGrupo(alerta.groupId, alerta.type);
   const nombreGrupo = alerta.group.name;
   const title = `${tipo.emoji} ${tipo.etiqueta}`;
-  const mapa = enlaceDeMapa(alerta.group);
+  const mapa = await ubicacionDeAlerta(alerta);
   const conTelefono = (texto) => `${texto}\nMarca al ${tipo.telefono}.`;
 
   if (alerta.source === "DEVICE") {
@@ -246,8 +246,8 @@ export async function enviarPushDeAlerta(alertId) {
   const alerta = await prisma.alert.findUnique({
     where: { id: alertId },
     include: {
-      group: { select: { name: true, address: true, latitude: true, longitude: true } },
-      device: { select: { name: true, deviceCode: true } },
+      group: { select: { name: true } },
+      device: { select: { name: true, deviceCode: true, address: true, latitude: true, longitude: true } },
       createdBy: { select: { email: true, displayName: true } },
       notifications: {
         where: { status: "PENDING" },
@@ -353,8 +353,8 @@ export async function enviarRecordatorioDeAlertaSostenida(alertId) {
   const alerta = await prisma.alert.findUnique({
     where: { id: alertId },
     include: {
-      group: { select: { name: true, address: true, latitude: true, longitude: true } },
-      device: { select: { name: true, deviceCode: true } },
+      group: { select: { name: true } },
+      device: { select: { name: true, deviceCode: true, address: true, latitude: true, longitude: true } },
       createdBy: { select: { email: true, displayName: true } },
       notifications: { include: { user: { select: { pushTokens: true } } } },
     },

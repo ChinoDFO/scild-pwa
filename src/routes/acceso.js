@@ -41,12 +41,13 @@ router.get("/", userAuth, async (req, res) => {
             rssi: true,
             internetFailures: true,
             heartbeatInterval: true,
+            address: true,
             // Todos los grupos a los que les avisa, del más antiguo al más
-            // nuevo. El primero es el "principal": el que da nombre y
-            // dirección al aparato.
+            // nuevo. El primero es el "principal": el que le da nombre al
+            // aparato (la dirección ya es del aparato mismo, ver address).
             groups: {
               orderBy: { createdAt: "asc" },
-              select: { group: { select: { id: true, name: true, address: true } } },
+              select: { group: { select: { id: true, name: true } } },
             },
           },
         }),
@@ -73,9 +74,7 @@ router.get("/", userAuth, async (req, res) => {
         deviceCode: device.deviceCode,
         // A qué grupos les avisa (hasta GRUPOS_POR_BOTON). Vacío = sin vincular.
         grupos: device.groups.map((v) => ({ id: v.group.id, name: v.group.name })),
-        // La dirección del botón es la del establecimiento del grupo
-        // principal: el aparato no tiene una propia.
-        direccion: device.groups[0]?.group.address ?? null,
+        direccion: device.address ?? null,
         estado: estadoEfectivo(device, Date.now()),
         ultimaSenal: device.lastSeenAt,
         bateria: device.batteryLevel,
@@ -149,15 +148,15 @@ router.patch("/botones/:id/config", userAuth, async (req, res) => {
   const deviceId = await exigirTitular(req, res);
   if (!deviceId) return;
 
-  const { nombre, heartbeatSegundos } = req.body ?? {};
+  const { nombre, heartbeatSegundos, address, latitude, longitude } = req.body ?? {};
   const { cambios, error } = validarConfiguracion(req.body);
   if (error) {
     return res.status(400).json({ error });
   }
 
-  // Estos dos no son llave/valor: viven en Device porque el servidor mismo
-  // los usa (el nombre en las listas, el intervalo para deducir si un botón
-  // se quedó sin señal).
+  // Estos no son llave/valor: viven en Device porque el servidor mismo los
+  // usa (el nombre en las listas, el intervalo para deducir si un botón se
+  // quedó sin señal, la dirección para "Ver ubicación" en sus alertas).
   const datosDelAparato = {};
   if (nombre !== undefined) {
     if (typeof nombre !== "string" || nombre.trim().length === 0 || nombre.trim().length > 40) {
@@ -173,6 +172,24 @@ router.patch("/botones/:id/config", userAuth, async (req, res) => {
       });
     }
     datosDelAparato.heartbeatInterval = n;
+  }
+  // Vacío borra la dirección (queda sin ubicación, como un botón recién
+  // dado de alta), no es un error.
+  if (address !== undefined) {
+    if (typeof address !== "string" || address.trim().length > 200) {
+      return res.status(400).json({ error: "La dirección puede tener máximo 200 caracteres" });
+    }
+    datosDelAparato.address = address.trim() || null;
+  }
+  for (const [campo, valor, limite] of [
+    ["latitude", latitude, 90],
+    ["longitude", longitude, 180],
+  ]) {
+    if (valor === undefined) continue;
+    if (valor !== null && (typeof valor !== "number" || Math.abs(valor) > limite)) {
+      return res.status(400).json({ error: `Coordenada inválida: ${campo}` });
+    }
+    datosDelAparato[campo] = valor;
   }
 
   await prisma.$transaction(async (tx) => {

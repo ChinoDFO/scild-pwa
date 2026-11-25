@@ -30,11 +30,11 @@ function generateInviteCode() {
 const esTexto = (v) => typeof v === "string" && v.trim().length > 0;
 
 // Valida los datos de un grupo. En "parcial" (edición) solo se revisa lo que
-// venga; al crear, nombre y dirección son obligatorios. La dirección es
-// obligatoria porque es lo que alguien necesita para llegar en una
-// emergencia. latitude/longitude aceptan null para borrarlas.
+// venga; al crear, el nombre es obligatorio. La dirección ya no es de aquí:
+// vive en cada botón (Device.address, se edita en "Configura tu botón"),
+// porque un mismo grupo puede tener varios botones en lugares distintos.
 function validarGrupo(body, { parcial }) {
-  const { name, address, latitude, longitude } = body ?? {};
+  const { name } = body ?? {};
   const data = {};
 
   if (name !== undefined || !parcial) {
@@ -42,24 +42,6 @@ function validarGrupo(body, { parcial }) {
       return { error: "El grupo necesita un nombre (máximo 80 caracteres)" };
     }
     data.name = name.trim();
-  }
-
-  if (address !== undefined || !parcial) {
-    if (!esTexto(address) || address.trim().length > 200) {
-      return { error: "La dirección del establecimiento es obligatoria (máximo 200 caracteres)" };
-    }
-    data.address = address.trim();
-  }
-
-  for (const [campo, valor, limite] of [
-    ["latitude", latitude, 90],
-    ["longitude", longitude, 180],
-  ]) {
-    if (valor === undefined) continue;
-    if (valor !== null && (typeof valor !== "number" || Math.abs(valor) > limite)) {
-      return { error: `Coordenada inválida: ${campo}` };
-    }
-    data[campo] = valor;
   }
 
   return { data };
@@ -241,9 +223,6 @@ router.get("/:id", userAuth, async (req, res) => {
   res.json({
     id: group.id,
     name: group.name,
-    address: group.address,
-    latitude: group.latitude,
-    longitude: group.longitude,
     // Null = no hay mensajes temporales en este grupo (se usa el borrado
     // general por antigüedad). Solo el admin la edita, pero cualquiera la
     // ve: el chat avisa a todos cuánto va a durar lo que escriben.
@@ -274,6 +253,11 @@ router.get("/:id", userAuth, async (req, res) => {
       id: d.id,
       deviceCode: d.deviceCode,
       name: d.name,
+      // Dónde está este botón en concreto: ya no sale del grupo, cada uno
+      // tiene la suya (se edita en "Configura tu botón").
+      address: d.address,
+      latitude: d.latitude,
+      longitude: d.longitude,
       status: estadoEfectivo(d, ahora),
       batteryLevel: d.batteryLevel,
       firmwareVersion: d.firmwareVersion,
@@ -288,7 +272,7 @@ router.get("/:id", userAuth, async (req, res) => {
   });
 });
 
-// El ADMIN edita nombre, dirección y coordenadas del establecimiento.
+// El ADMIN edita el nombre del grupo (la dirección ya es de cada botón).
 router.patch("/:id", userAuth, async (req, res) => {
   if (!(await exigirAdmin(req, res))) return;
 

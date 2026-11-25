@@ -97,9 +97,6 @@ model User {
 model Group {
   id         String   @id @default(uuid())
   name       String
-  address    String?
-  latitude   Float?
-  longitude  Float?
   // Cuánta gente cabe. Lo edita el administrador del grupo hasta MAX_MIEMBROS
   // (50). Antes salía de los botones vinculados —cada uno daba diez lugares—,
   // pero eso ataba el tamaño del grupo a cuántos aparatos había dentro, que
@@ -162,6 +159,14 @@ model Device {
   id                String       @id @default(uuid())
   deviceCode        String       @unique
   name              String?
+  // Dónde está EL APARATO físicamente — ya no el grupo: un mismo botón puede
+  // avisarle a varios grupos (hasta GRUPOS_POR_BOTON), y antes su "ubicación"
+  // era la del primero de ellos, que para los demás no tenía ningún
+  // sentido. Se edita desde "Configura tu botón". Null hasta que alguien la
+  // capture ahí.
+  address           String?
+  latitude          Float?
+  longitude         Float?
   // Quién lo vinculó. En un coto es el vecino dueño de esa casa.
   ownerId           String?
   // El código impreso en la caja. NO cambia al desvincular: el papel de la

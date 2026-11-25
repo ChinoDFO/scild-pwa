@@ -8,7 +8,7 @@ import { emitirAGrupo } from "../realtime.js";
 import { catalogoDelGrupo, esTipoValidoParaGrupo, tipoDeAlertaParaGrupo } from "../tiposAlertaGrupo.js";
 import { TIPOS_ALERTA } from "../tiposAlerta.js";
 import { protocoloDeAlerta } from "../protocolosAlerta.js";
-import { enlaceDeMapa } from "../mapas.js";
+import { ubicacionDeAlerta } from "../mapas.js";
 
 const router = Router();
 
@@ -21,10 +21,12 @@ const SELECCION_ALERTA = {
   createdAt: true,
   acknowledgedAt: true,
   resolvedAt: true,
-  // address/latitude/longitude son para armar `ubicacion` de abajo; no se
-  // vuelven a mandar sueltos, se arma `group` de nuevo solo con name.
-  group: { select: { name: true, address: true, latitude: true, longitude: true } },
-  device: { select: { name: true, deviceCode: true } },
+  // createdById no se vuelve a mandar suelto (se arma `group` de nuevo solo
+  // con name): es para resolver `ubicacion` de abajo cuando la alerta no
+  // tiene botón (se usa la del botón de quien la mandó).
+  createdById: true,
+  group: { select: { name: true } },
+  device: { select: { name: true, deviceCode: true, address: true, latitude: true, longitude: true } },
   createdBy: { select: { email: true, displayName: true } },
   acknowledgedBy: { select: { email: true, displayName: true } },
 };
@@ -45,7 +47,7 @@ async function formatoAlerta(alerta) {
       telefono: tipo.telefono,
       protocolo: tipo.protocolo,
     },
-    ubicacion: enlaceDeMapa(alerta.group),
+    ubicacion: await ubicacionDeAlerta(alerta),
   };
 }
 

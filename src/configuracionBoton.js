@@ -140,11 +140,13 @@ export async function configuracionParaElBoton(deviceId) {
         name: true,
         deviceCode: true,
         heartbeatInterval: true,
-        // El grupo principal (el más antiguo) da nombre y dirección al aparato.
+        address: true,
+        // El grupo principal (el más antiguo) le da el nombre al aparato; la
+        // dirección ya es del aparato mismo, ver Device.address.
         groups: {
           orderBy: { createdAt: "asc" },
           take: 1,
-          select: { group: { select: { name: true, address: true } } },
+          select: { group: { select: { name: true } } },
         },
       },
     }),
@@ -160,7 +162,7 @@ export async function configuracionParaElBoton(deviceId) {
     // portal; el nombre del establecimiento es el del grupo donde está
     // vinculado, igual que en la app.
     nombre: device.groups[0]?.group.name || device.name || device.deviceCode,
-    direccion: device.groups[0]?.group.address ?? "",
+    direccion: device.address ?? "",
     heartbeatSegundos: device.heartbeatInterval,
     cooldownSegundos: Number(valor("cooldownSegundos")) || 10,
     ssidRespaldo: valor("ssidRespaldo"),
