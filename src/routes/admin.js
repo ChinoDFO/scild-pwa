@@ -188,4 +188,36 @@ router.post("/dispositivos", async (req, res) => {
   });
 });
 
+// Deshace un alta por error (deviceCode repetido, secreto que no se copió
+// bien, etc.) — SOLO mientras siga en el inventario. Uno que ya tiene dueño
+// de verdad no se puede borrar desde aquí: eso le quitaría el botón a una
+// cuenta real, y para eso ya existe el camino de soltar un titular
+// (DELETE /api/acceso/botones/:id) o eliminar la cuenta.
+router.delete("/dispositivos/:id", async (req, res) => {
+  const device = await prisma.device.findUnique({
+    where: { id: req.params.id },
+    select: { id: true, deviceCode: true, holders: { select: { id: true }, take: 1 } },
+  });
+  if (!device) {
+    return res.status(404).json({ error: "Ese botón no existe" });
+  }
+  if (device.holders.length > 0) {
+    return res.status(409).json({ error: "Ese botón ya tiene dueño, no se puede borrar desde aquí" });
+  }
+
+  await prisma.auditLog.create({
+    data: {
+      userId: req.user.id,
+      action: "DEVICE_DELETED",
+      entity: "Device",
+      entityId: device.id,
+      metadata: { deviceCode: device.deviceCode },
+    },
+  });
+
+  await prisma.device.delete({ where: { id: device.id } });
+
+  res.json({ ok: true });
+});
+
 export default router;
