@@ -65,6 +65,7 @@ router.get("/botones", async (req, res) => {
       id: true,
       name: true,
       deviceCode: true,
+      claimCode: true,
       createdAt: true,
       groups: { orderBy: { createdAt: "asc" }, select: { group: { select: { name: true } } } },
       holders: {
@@ -85,6 +86,10 @@ router.get("/botones", async (req, res) => {
       deviceCode: d.deviceCode,
       // El nombre que le puso su dueño, si lo hay; el código ya va aparte.
       nombre: d.name,
+      // El código de la caja también sirve para un botón YA vinculado: para
+      // un admin, a veces es la única forma de confirmar o recuperar qué
+      // código traía impreso una caja en concreto.
+      codigoDeLaCaja: formatearClaimCode(d.claimCode),
       personas: d.holders.map((h) => ({
         userId: h.user.id,
         nombre: nombreDe(h.user),
